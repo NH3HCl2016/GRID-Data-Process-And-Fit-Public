@@ -5,13 +5,13 @@ v0.0.2 for Grid2 calibration result analysis by ydx and ghz
 
 import numpy as np
 import lmfit
-from scipy.optimize import curve_fit
 from scipy.odr import ODR, Model, Data, RealData
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import struct
 import crc16
 import os
+from copy import copy
 
 #******************************************************************************************************************************************************
 #*****************************************************Basic readout and fit functions*************************************************************
@@ -118,7 +118,7 @@ def crcCheck(data, crc):
         return False
     return True
 
-def dataReadout(filename, isHex = False, isCi = 0, isScan = False, scanRange = [], rateStyle = ''):
+def dataReadout(filename, isHex = False, isCi = 0, isScan = False, scanRange = [], rateStyle = '', newProgramme = False, timeCut = -1.0):
     
     """
     Function for reading out single Grid raw outout file
@@ -129,11 +129,13 @@ def dataReadout(filename, isHex = False, isCi = 0, isScan = False, scanRange = [
     :param scanRange: list containing the scan range for multiple scans
     :param rateStyle: the style of calculating real count rate, '' for none, 's' for calculation with small data packs(512byte), \
 'l' for calculation with large data packs(4096byte)
+    :param newProgramme: boolean indicating whether the data comes from new hardware programme(6th ver.)
+    :param timeCut: cut of time data in seconds, specially designed for temp-bias data with pid bias control(6th ver.)
     :return: all data extracted from the data file, including spectrums, SiPM&ADC temperatures, SiPM voltage&leak current,\
- uscount, [CI data], [I-V scan data], all data in the form of ndarray
+ uscount, correct live time, effective counts, missing counts, [CI data], [I-V scan data], all data in the form of ndarray
     """
 
-    styleAvailable = ['s', 'l', '']
+    styleAvailable = ['s', 'p', '']
     if not rateStyle in styleAvailable:
         raise Exception('dataReadout: count rate calculation style \'' + rateStyle + '\' not available')
 
@@ -159,10 +161,11 @@ def dataReadout(filename, isHex = False, isCi = 0, isScan = False, scanRange = [
     vSet = [] #i-v scan data
     vScan = [] #i-v scan data
     iScan = [] #i-v scan data
-    rateCorrect = []
-    if rateStyle == 'l':
-        evtBegin = []
-        evtEnd = []
+    timeCorrect = []
+    effectiveCount = []
+    effectiveCountCI = []
+    missingCount = []
+    missingCountCI = []
 
     if isCi == 2:
         ranged = False
@@ -225,7 +228,13 @@ def dataReadout(filename, isHex = False, isCi = 0, isScan = False, scanRange = [
             else:
                 print('Run #' + str(nScan + 1))
             uscount.append([])
-            rateCorrect.append([])
+            if not rateStyle == '':
+                timeCorrect.append([])
+            if newProgramme:
+                effectiveCount.append([])
+                effectiveCountCI.append([])
+                missingCount.append([])
+                missingCountCI.append([])
             for ich in range(4):
                 amp[ich].append([])
                 ampCI[ich].append([])
@@ -258,57 +267,65 @@ def dataReadout(filename, isHex = False, isCi = 0, isScan = False, scanRange = [
 
                 for il in range(len(lineFloat)):
                     #Evevt data
-                    if lineFloat[il] == 170 and lineFloat[il + 1] == 187 and lineFloat[il + 2] == 204 \
-                        and il + 502 <= len(lineFloat) and lineFloat[il + 499] == 221 and lineFloat[il + 500] == 238 \
-                        and lineFloat[il + 501] == 255:
+                    if (lineFloat[il] == 170 and lineFloat[il + 1] == 187 and lineFloat[il + 2] == 204) and \
+                        ((il + 502 <= len(lineFloat) and lineFloat[il + 499] == 221 and lineFloat[il + 500] == 238 and lineFloat[il + 501] == 255 and (not newProgramme)) \
+                        or (il + 510 <= len(lineFloat) and lineFloat[il + 507] == 221 and lineFloat[il + 508] == 238 and lineFloat[il + 509] == 255 and newProgramme)):
                             timeEvtBegin = 0.0
                             timeEvtEnd = 0.0
-                            #crc check and crc buffer fill
-                            if len(dataBuffer) >= bufferLen:
-                                del dataBuffer[0]
-                            dataBuffer.append(lineFloat[496:504])
-                            #check the previous telemetry data
-                            for buf in lineBuffer:
-                                if buf[498:504] == lineFloat[498:504]:
-                                    bufMatch = buf
-                                    bufcrc = buf[496:498]
-                                    bufMatch[496:498] = lineFloat[496:498]
-                                    if not crcCheck(bufMatch[0:510], bufcrc):
-                                        crcError += 1
-                                        del lineBuffer[lineBuffer.index(buf)]
-                                    else:
-                                        if isCi == 2:
-                                            for it in range(7):
-                                                uscount[nScan].append(float(sum([buf[15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
-                                                for ich in range(4):
-                                                    tempSipm[ich][nScan].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] - 4096) / 16.0) \
-                                                        if buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] > 2048 \
-                                                        else tempSipm[ich][nScan].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it]) / 16.0)
-                                                    tempAdc[ich][nScan].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] - 4096) / 16.0) \
-                                                        if buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] > 2048 \
-                                                        else tempAdc[ich][nScan].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it]) / 16.0)
-                                                    vMon[ich][nScan].append(float(buf[39 + 2 * ich + 70 * it] * 256 + buf[40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
-                                                    iMon[ich][nScan].append(float(buf[47 + 2 * ich + 70 * it] * 256 + buf[48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
-                                                    bias[ich][nScan].append(vMon[ich][nScan][-1] - iMon[ich][nScan][-1] * 2.0)
+                            timeIntv = []
+                            if not newProgramme:
+                                #crc check and crc buffer fill
+                                if len(dataBuffer) >= bufferLen:
+                                    del dataBuffer[0]
+                                dataBuffer.append(lineFloat[496:504])
+                                #check the previous telemetry data
+                                for buf in lineBuffer:
+                                    if buf[498:504] == lineFloat[498:504]:
+                                        bufMatch = buf
+                                        bufcrc = buf[496:498]
+                                        bufMatch[496:498] = lineFloat[496:498]
+                                        if not crcCheck(bufMatch[0:510], bufcrc):
+                                            crcError += 1
+                                            del lineBuffer[lineBuffer.index(buf)]
                                         else:
-                                            for it in range(7):
-                                                uscount.append(float(sum([buf[15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
-                                                for ich in range(4):
-                                                    tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] - 4096) / 16.0) \
-                                                        if buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] > 2048 \
-                                                        else tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it]) / 16.0)
-                                                    tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] - 4096) / 16.0) \
-                                                        if buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] > 2048 \
-                                                        else tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it]) / 16.0)
-                                                    vMon[ich].append(float(buf[39 + 2 * ich + 70 * it] * 256 + buf[40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
-                                                    iMon[ich].append(float(buf[47 + 2 * ich + 70 * it] * 256 + buf[48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
-                                                    bias[ich].append(vMon[ich][-1] - iMon[ich][-1] * 2.0)
-                                        del lineBuffer[lineBuffer.index(buf)]
-                                    break
-                            if not crcCheck(lineFloat[:502], lineFloat[502:504]):
-                                crcError += 1
-                                continue
+                                            if isCi == 2:
+                                                for it in range(7):
+                                                    uscount[nScan].append(float(sum([buf[15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
+                                                    for ich in range(4):
+                                                        tempSipm[ich][nScan].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] - 4096) / 16.0) \
+                                                            if buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] > 2048 \
+                                                            else tempSipm[ich][nScan].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it]) / 16.0)
+                                                        tempAdc[ich][nScan].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] - 4096) / 16.0) \
+                                                            if buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] > 2048 \
+                                                            else tempAdc[ich][nScan].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it]) / 16.0)
+                                                        vMon[ich][nScan].append(float(buf[39 + 2 * ich + 70 * it] * 256 + buf[40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
+                                                        iMon[ich][nScan].append(float(buf[47 + 2 * ich + 70 * it] * 256 + buf[48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
+                                                        bias[ich][nScan].append(vMon[ich][nScan][-1] - iMon[ich][nScan][-1])
+                                            else:
+                                                for it in range(7):
+                                                    uscount.append(float(sum([buf[15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
+                                                    for ich in range(4):
+                                                        tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] - 4096) / 16.0) \
+                                                            if buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] > 2048 \
+                                                            else tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it]) / 16.0)
+                                                        tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] - 4096) / 16.0) \
+                                                            if buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] > 2048 \
+                                                            else tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it]) / 16.0)
+                                                        vMon[ich].append(float(buf[39 + 2 * ich + 70 * it] * 256 + buf[40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
+                                                        iMon[ich].append(float(buf[47 + 2 * ich + 70 * it] * 256 + buf[48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
+                                                        bias[ich].append(vMon[ich][-1] - iMon[ich][-1])
+                                            del lineBuffer[lineBuffer.index(buf)]
+                                        break
+                                if not crcCheck(lineFloat[:502], lineFloat[502:504]):
+                                    crcError += 1
+                                    continue
+                            else:
+                                if not crcCheck(lineFloat[:510], lineFloat[510:512]):
+                                    crcError += 1
+                                    continue
                             ch = lineFloat[il + 3]
+                            if newProgramme:
+                                ch += 1
                             if isCi == 2:
                                 if ch > 0 and ch < 5:
                                     if bCi:
@@ -330,11 +347,13 @@ def dataReadout(filename, isHex = False, isCi = 0, isScan = False, scanRange = [
                                 else:
                                     indexOut += 1
                             if rateStyle == 's' and not bCi:
+                                timeIntv.append(float(sum([lineFloat[il + 4 + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
+                            elif rateStyle == 'p' and not bCi:
                                 timeEvtBegin = float(sum([lineFloat[il + 4 + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6
-                            elif rateStyle == 'l' and not bCi:
-                                evtBegin.append(float(sum([lineFloat[il + 4 + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
                             for ie in range(43):
                                 ch = lineFloat[il + 26 + 11 * ie]
+                                if newProgramme:
+                                    ch += 1
                                 if isCi == 2:
                                     if ch > 0 and ch < 5:
                                         if bCi:
@@ -355,78 +374,104 @@ def dataReadout(filename, isHex = False, isCi = 0, isScan = False, scanRange = [
                                             uscountEvt[ch - 1].append(float(sum([lineFloat[il + 27 + 11 * ie + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
                                     else:
                                         indexOut += 1
+                                if rateStyle == 's' and not bCi:
+                                    timeIntv.append(float(sum([lineFloat[il + 27 + 11 * ie + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
                             if rateStyle == 's' and not bCi:
+                                timeIntv = np.array(timeIntv)
+                                if isCi == 2:
+                                    timeCorrect[nScan] += list(timeIntv[1:] - timeIntv[:-1])
+                                else:
+                                    timeCorrect += list(timeIntv[1:] - timeIntv[:-1])
+                            elif rateStyle == 'p' and not bCi:
                                 timeEvtEnd = float(sum([lineFloat[il + 27 + 11 * 42 + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6
                                 if isCi == 2:
-                                    rateCorrect[nScan].append(43 / (timeEvtEnd - timeEvtBegin - 43 * 50e-6))
+                                    timeCorrect[nScan].append(timeEvtEnd - timeEvtBegin)
                                 else:
-                                    rateCorrect.append(43 / (timeEvtEnd - timeEvtBegin - 43 * 50e-6))
-                            elif rateStyle == 'l' and not bCi:
-                                evtEnd.append(float(sum([lineFloat[il + 27 + 11 * 42 + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
+                                    timeCorrect.append(timeEvtEnd - timeEvtBegin)
+                            if newProgramme:
+                                if isCi == 2:
+                                    if bCi:
+                                        effectiveCountCI[nScan].append(int(sum([lineFloat[il + 499 + ic] * 256 ** (3 - ic) for ic in range(4)])))
+                                        missingCountCI[nScan].append(int(sum([lineFloat[il + 503 + ic] * 256 ** (3 - ic) for ic in range(4)])))
+                                    else:
+                                        effectiveCount[nScan].append(int(sum([lineFloat[il + 499 + ic] * 256 ** (3 - ic) for ic in range(4)])))
+                                        missingCount[nScan].append(int(sum([lineFloat[il + 503 + ic] * 256 ** (3 - ic) for ic in range(4)])))
+                                else:
+                                    if bCi:
+                                        effectiveCountCI.append(int(sum([lineFloat[il + 499 + ic] * 256 ** (3 - ic) for ic in range(4)])))
+                                        missingCountCI.append(int(sum([lineFloat[il + 503 + ic] * 256 ** (3 - ic) for ic in range(4)])))
+                                    else:
+                                        effectiveCount.append(int(sum([lineFloat[il + 499 + ic] * 256 ** (3 - ic) for ic in range(4)])))
+                                        missingCount.append(int(sum([lineFloat[il + 503 + ic] * 256 ** (3 - ic) for ic in range(4)])))
 
                     #Telemetry data
-                    elif lineFloat[il] == 1 and lineFloat[il + 1] == 35 and lineFloat[il + 2] == 69 \
-                        and il + 502 <= len(lineFloat) and lineFloat[il + 493] == 103 and lineFloat[il + 494] == 137 \
-                        and lineFloat[il + 495] == 16:
-                            #check the data before the current data
-                            crcCorrect = []
-                            for databuf in dataBuffer:
-                                if databuf[2:] == lineFloat[498:504]:
-                                    crcCorrect = databuf[:2]
-                                    break
-                            #check the previous telemetry data
-                            for buf in lineBuffer:
-                                if buf[498:504] == lineFloat[498:504]:
-                                    bufMatch = buf
-                                    bufcrc = buf[496:498]
-                                    bufMatch[496:498] = lineFloat[496:498]
-                                    if not crcCheck(bufMatch[0:510], bufcrc):
-                                        crcError += 1
-                                        del lineBuffer[lineBuffer.index(buf)]
-                                    else:
-                                        if isCi == 2:
-                                            for it in range(7):
-                                                uscount[nScan].append(float(sum([buf[15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
-                                                for ich in range(4):
-                                                    tempSipm[ich][nScan].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] - 4096) / 16.0) \
-                                                        if buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] > 2048 \
-                                                        else tempSipm[ich][nScan].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it]) / 16.0)
-                                                    tempAdc[ich][nScan].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] - 4096) / 16.0) \
-                                                        if buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] > 2048 \
-                                                        else tempAdc[ich][nScan].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it]) / 16.0)
-                                                    vMon[ich][nScan].append(float(buf[39 + 2 * ich + 70 * it] * 256 + buf[40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
-                                                    iMon[ich][nScan].append(float(buf[47 + 2 * ich + 70 * it] * 256 + buf[48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
-                                                    bias[ich][nScan].append(vMon[ich][nScan][-1] - iMon[ich][nScan][-1] * 2.0)
+                    elif (lineFloat[il] == 1 and lineFloat[il + 1] == 35 and lineFloat[il + 2] == 69 and il + 502 <= len(lineFloat) and lineFloat[il + 493] == 103 and lineFloat[il + 494] == 137 \
+                        and lineFloat[il + 495] == 16 and (not newProgramme)) or (lineFloat[il] == 18 and lineFloat[il + 1] == 52 and lineFloat[il + 2] == 86 and il + 502 <= len(lineFloat) and \
+                        lineFloat[il + 493] == 120 and lineFloat[il + 494] == 154 and lineFloat[il + 495] == 188 and newProgramme):
+                            if not newProgramme:
+                                #check the data before the current data
+                                crcCorrect = []
+                                for databuf in dataBuffer:
+                                    if databuf[2:] == lineFloat[498:504]:
+                                        crcCorrect = databuf[:2]
+                                        break
+                                #check the previous telemetry data
+                                for buf in lineBuffer:
+                                    if buf[498:504] == lineFloat[498:504]:
+                                        bufMatch = buf
+                                        bufcrc = buf[496:498]
+                                        bufMatch[496:498] = lineFloat[496:498]
+                                        if not crcCheck(bufMatch[0:510], bufcrc):
+                                            crcError += 1
+                                            del lineBuffer[lineBuffer.index(buf)]
                                         else:
-                                            for it in range(7):
-                                                uscount.append(float(sum([buf[15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
-                                                for ich in range(4):
-                                                    tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] - 4096) / 16.0) \
-                                                        if buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] > 2048 \
-                                                        else tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it]) / 16.0)
-                                                    tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] - 4096) / 16.0) \
-                                                        if buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] > 2048 \
-                                                        else tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it]) / 16.0)
-                                                    vMon[ich].append(float(buf[39 + 2 * ich + 70 * it] * 256 + buf[40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
-                                                    iMon[ich].append(float(buf[47 + 2 * ich + 70 * it] * 256 + buf[48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
-                                                    bias[ich].append(vMon[ich][-1] - iMon[ich][-1] * 2.0)
-                                        del lineBuffer[lineBuffer.index(buf)]
-                                    break
-                            #crc check and crc buffer fill
-                            if len(dataBuffer) >= bufferLen:
-                                del dataBuffer[0]
-                            dataBuffer.append(lineFloat[496:504])
-                            temp = lineFloat[496:498]
-                            if not len(crcCorrect) == 0:
-                                lineFloat[496:498] = crcCorrect
-                            else:
-                                if len(lineBuffer) >= lineLen:
-                                    del lineBuffer[0]
+                                            if isCi == 2:
+                                                for it in range(7):
+                                                    uscount[nScan].append(float(sum([buf[15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
+                                                    for ich in range(4):
+                                                        tempSipm[ich][nScan].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] - 4096) / 16.0) \
+                                                            if buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] > 2048 \
+                                                            else tempSipm[ich][nScan].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it]) / 16.0)
+                                                        tempAdc[ich][nScan].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] - 4096) / 16.0) \
+                                                            if buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] > 2048 \
+                                                            else tempAdc[ich][nScan].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it]) / 16.0)
+                                                        vMon[ich][nScan].append(float(buf[39 + 2 * ich + 70 * it] * 256 + buf[40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
+                                                        iMon[ich][nScan].append(float(buf[47 + 2 * ich + 70 * it] * 256 + buf[48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
+                                                        bias[ich][nScan].append(vMon[ich][nScan][-1] - iMon[ich][nScan][-1])
+                                            else:
+                                                for it in range(7):
+                                                    uscount.append(float(sum([buf[15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
+                                                    for ich in range(4):
+                                                        tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] - 4096) / 16.0) \
+                                                            if buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] > 2048 \
+                                                            else tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it]) / 16.0)
+                                                        tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] - 4096) / 16.0) \
+                                                            if buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] > 2048 \
+                                                            else tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it]) / 16.0)
+                                                        vMon[ich].append(float(buf[39 + 2 * ich + 70 * it] * 256 + buf[40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
+                                                        iMon[ich].append(float(buf[47 + 2 * ich + 70 * it] * 256 + buf[48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
+                                                        bias[ich].append(vMon[ich][-1] - iMon[ich][-1])
+                                            del lineBuffer[lineBuffer.index(buf)]
+                                        break
+                                #crc check and crc buffer fill
+                                if len(dataBuffer) >= bufferLen:
+                                    del dataBuffer[0]
+                                dataBuffer.append(lineFloat[496:504])
+                                temp = lineFloat[496:498]
+                                if not len(crcCorrect) == 0:
+                                    lineFloat[496:498] = crcCorrect
+                                else:
+                                    if len(lineBuffer) >= lineLen:
+                                        del lineBuffer[0]
+                                        crcError += 1
+                                    lineBuffer.append(lineFloat)
+                                if not crcCheck(lineFloat[0:510], temp):
                                     crcError += 1
-                                lineBuffer.append(lineFloat)
-                            if not crcCheck(lineFloat[0:510], temp):
-                                crcError += 1
-                                continue
+                                    continue
+                            else:
+                                if not crcCheck(lineFloat[0:496], lineFloat[496:498]):
+                                    crcError += 1
+                                    continue
                             for it in range(7):
                                 if isCi == 2:
                                     uscount[nScan].append(float(sum([lineFloat[il + 15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
@@ -463,113 +508,138 @@ def dataReadout(filename, isHex = False, isCi = 0, isScan = False, scanRange = [
                 il = 0
                 while il + 502 <= len(lineFloat):
                     #Event data
-                    if lineFloat[il] == 170 and lineFloat[il + 1] == 187 and lineFloat[il + 2] == 204 \
-                        and lineFloat[il + 499] == 221 and lineFloat[il + 500] == 238 and lineFloat[il + 501] == 255:
+                    if (lineFloat[il] == 170 and lineFloat[il + 1] == 187 and lineFloat[il + 2] == 204) and \
+                        ((il + 502 <= len(lineFloat) and lineFloat[il + 499] == 221 and lineFloat[il + 500] == 238 and lineFloat[il + 501] == 255 and (not newProgramme)) \
+                        or (il + 510 <= len(lineFloat) and lineFloat[il + 507] == 221 and lineFloat[il + 508] == 238 and lineFloat[il + 509] == 255 and newProgramme)):
                             timeEvtBegin = 0.0
                             timeEvtEnd = 0.0
-                            #crc check and crc buffer fill
-                            if len(dataBuffer) >= bufferLen:
-                                del dataBuffer[0]
-                            dataBuffer.append(lineFloat[il + 496:il + 504])
-                            #check the previous telemetry data
-                            for buf in lineBuffer:
-                                if buf[498:504] == lineFloat[il + 498:il + 504]:
-                                    bufcrc = buf[496:498]
-                                    buf[496:498] = lineFloat[il + 496:il + 498]
-                                    if not crcCheck(buf[0:510], bufcrc):
-                                        crcError += 1
-                                        del lineBuffer[lineBuffer.index(buf)]
-                                    else:
-                                        for it in range(7):
-                                            uscount.append(float(sum([buf[15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
-                                            for ich in range(4):
-                                                tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] - 4096) / 16.0) \
-                                                    if buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] > 2048 \
-                                                    else tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it]) / 16.0)
-                                                tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] - 4096) / 16.0) \
-                                                    if buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] > 2048 \
-                                                    else tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it]) / 16.0)
-                                                vMon[ich].append(float(buf[39 + 2 * ich + 70 * it] * 256 + buf[40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
-                                                iMon[ich].append(float(buf[47 + 2 * ich + 70 * it] * 256 + buf[48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
-                                                bias[ich].append(vMon[ich][-1] - iMon[ich][-1] * 2.0)
-                                        del lineBuffer[lineBuffer.index(buf)]
-                                    break
-                            if not crcCheck(lineFloat[il:il + 502], lineFloat[il + 502:il + 504]):
-                                crcError += 1
-                                il += 512
-                                continue
+                            timeIntv = []
+                            if not newProgramme:
+                                #crc check and crc buffer fill
+                                if len(dataBuffer) >= bufferLen:
+                                    del dataBuffer[0]
+                                dataBuffer.append(lineFloat[il + 496:il + 504])
+                                #check the previous telemetry data
+                                for buf in lineBuffer:
+                                    if buf[498:504] == lineFloat[il + 498:il + 504]:
+                                        bufcrc = buf[496:498]
+                                        buf[496:498] = lineFloat[il + 496:il + 498]
+                                        if not crcCheck(buf[0:510], bufcrc):
+                                            crcError += 1
+                                            del lineBuffer[lineBuffer.index(buf)]
+                                        else:
+                                            for it in range(7):
+                                                uscount.append(float(sum([buf[15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
+                                                for ich in range(4):
+                                                    tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] - 4096) / 16.0) \
+                                                        if buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] > 2048 \
+                                                        else tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it]) / 16.0)
+                                                    tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] - 4096) / 16.0) \
+                                                        if buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] > 2048 \
+                                                        else tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it]) / 16.0)
+                                                    vMon[ich].append(float(buf[39 + 2 * ich + 70 * it] * 256 + buf[40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
+                                                    iMon[ich].append(float(buf[47 + 2 * ich + 70 * it] * 256 + buf[48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
+                                                    bias[ich].append(vMon[ich][-1] - iMon[ich][-1])
+                                            del lineBuffer[lineBuffer.index(buf)]
+                                        break
+                                if not crcCheck(lineFloat[il:il + 502], lineFloat[il + 502:il + 504]):
+                                    crcError += 1
+                                    il += 512
+                                    continue
+                            else:
+                                if not crcCheck(lineFloat[il:il + 510], lineFloat[il + 510:il + 512]):
+                                    crcError += 1
+                                    il += 512
+                                    continue
                             ch = lineFloat[il + 3]
+                            if newProgramme:
+                                ch += 1
                             if ch > 0 and ch < 5:
                                 amp[ch - 1].append(lineFloat[il + 12] * 256 + lineFloat[il + 13])
                                 uscountEvt[ch - 1].append(float(sum([lineFloat[il + 4 + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
                             else:
                                 indexOut += 1
                             if rateStyle == 's':
+                                timeIntv.append(float(sum([lineFloat[il + 4 + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
+                            elif rateStyle == 'p':
                                 timeEvtBegin = float(sum([lineFloat[il + 4 + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6
-                            elif rateStyle == 'l':
-                                evtBegin.append(float(sum([lineFloat[il + 4 + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
                             for ie in range(43):
                                 ch = lineFloat[il + 26 + 11 * ie]
+                                if newProgramme:
+                                    ch += 1
                                 if ch > 0 and ch < 5:
                                     amp[ch - 1].append(lineFloat[il + 35 + 11 * ie] * 256 + lineFloat[il + 36 + 11 * ie])
                                     uscountEvt[ch - 1].append(float(sum([lineFloat[il + 27 + 11 * ie + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
                                 else:
                                     indexOut += 1
+                                if rateStyle == 's':
+                                    timeIntv.append(float(sum([lineFloat[il + 27 + 11 * ie + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
                             if rateStyle == 's':
+                                timeIntv = np.array(timeIntv)
+                                timeCorrect += list(timeIntv[1:] - timeIntv[:-1])
+                            elif rateStyle == 'p':
                                 timeEvtEnd = float(sum([lineFloat[il + 27 + 11 * 42 + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6
-                                rateCorrect.append(43 / (timeEvtEnd - timeEvtBegin - 43 * 50e-6))
-                            elif rateStyle == 'l':
-                                evtEnd.append(float(sum([lineFloat[il + 27 + 11 * 42 + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
+                                timeCorrect.append(timeEvtEnd - timeEvtBegin)
+                            if newProgramme:
+                                effectiveCount.append(int(sum([lineFloat[il + 499 + ic] * 256 ** (3 - ic) for ic in range(4)])))
+                                missingCount.append(int(sum([lineFloat[il + 503 + ic] * 256 ** (3 - ic) for ic in range(4)])))
                             il += 511
                     
                     #Telemetry data
-                    elif lineFloat[il] == 1 and lineFloat[il + 1] == 35 and lineFloat[il + 2] == 69 \
-                        and lineFloat[il + 493] == 103 and lineFloat[il + 494] == 137 and lineFloat[il + 495] == 16:
-                            #check the data before the current data
-                            crcCorrect = []
-                            for i in dataBuffer:
-                                if i[2:] == lineFloat[il + 498:il + 504]:
-                                    crcCorrect = i[:2]
-                                    break
-                            #check the previous telemetry data
-                            for buf in lineBuffer:
-                                if buf[498:504] == lineFloat[il + 498:il + 504]:
-                                    bufcrc = buf[496:498]
-                                    buf[496:498] = lineFloat[il + 496:il + 498]
-                                    if not crcCheck(buf[0:510], bufcrc):
+                    elif (lineFloat[il] == 1 and lineFloat[il + 1] == 35 and lineFloat[il + 2] == 69 and il + 502 <= len(lineFloat) and lineFloat[il + 493] == 103 and lineFloat[il + 494] == 137 \
+                        and lineFloat[il + 495] == 16 and (not newProgramme)) or (lineFloat[il] == 18 and lineFloat[il + 1] == 52 and lineFloat[il + 2] == 86 and il + 502 <= len(lineFloat) and \
+                        lineFloat[il + 493] == 120 and lineFloat[il + 494] == 154 and lineFloat[il + 495] == 188 and newProgramme):
+                            if not newProgramme:
+                                #check the data before the current data
+                                crcCorrect = []
+                                for i in dataBuffer:
+                                    if i[2:] == lineFloat[il + 498:il + 504]:
+                                        crcCorrect = i[:2]
+                                        break
+                                #check the previous telemetry data
+                                for buf in lineBuffer:
+                                    if buf[498:504] == lineFloat[il + 498:il + 504]:
+                                        bufcrc = buf[496:498]
+                                        buf[496:498] = lineFloat[il + 496:il + 498]
+                                        if not crcCheck(buf[0:510], bufcrc):
+                                            crcError += 1
+                                            del lineBuffer[lineBuffer.index(buf)]
+                                        else:
+                                            for it in range(7):
+                                                uscount.append(float(sum([buf[15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
+                                                for ich in range(4):
+                                                    tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] - 4096) / 16.0) \
+                                                        if buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] > 2048 \
+                                                        else tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it]) / 16.0)
+                                                    tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] - 4096) / 16.0) \
+                                                        if buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] > 2048 \
+                                                        else tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it]) / 16.0)
+                                                    vMon[ich].append(float(buf[39 + 2 * ich + 70 * it] * 256 + buf[40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
+                                                    iMon[ich].append(float(buf[47 + 2 * ich + 70 * it] * 256 + buf[48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
+                                                    bias[ich].append(vMon[ich][-1] - iMon[ich][-1])
+                                            del lineBuffer[lineBuffer.index(buf)]
+                                        break
+                                #crc check and crc buffer fill
+                                if len(dataBuffer) >= bufferLen:
+                                    del dataBuffer[0]
+                                dataBuffer.append(lineFloat[il + 496:il + 504])
+                                temp = lineFloat[il + 496:il + 498]
+                                if not len(crcCorrect) == 0:
+                                    lineFloat[il + 496:il + 498] = crcCorrect
+                                else:
+                                    if len(lineBuffer) >= lineLen:
+                                        del lineBuffer[0]
                                         crcError += 1
-                                        del lineBuffer[lineBuffer.index(buf)]
-                                    else:
-                                        for it in range(7):
-                                            uscount.append(float(sum([buf[15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
-                                            for ich in range(4):
-                                                tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] - 4096) / 16.0) \
-                                                    if buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it] > 2048 \
-                                                    else tempSipm[ich].append(float(buf[23 + 2 * ich + 70 * it] * 256 + buf[24 + 2 * ich + 70 * it]) / 16.0)
-                                                tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] - 4096) / 16.0) \
-                                                    if buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it] > 2048 \
-                                                    else tempAdc[ich].append(float(buf[31 + 2 * ich + 70 * it] * 256 + buf[32 + 2 * ich + 70 * it]) / 16.0)
-                                                vMon[ich].append(float(buf[39 + 2 * ich + 70 * it] * 256 + buf[40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
-                                                iMon[ich].append(float(buf[47 + 2 * ich + 70 * it] * 256 + buf[48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
-                                                bias[ich].append(vMon[ich][-1] - iMon[ich][-1] * 2.0)
-                                        del lineBuffer[lineBuffer.index(buf)]
-                                    break
-                            #crc check and crc buffer fill
-                            if len(dataBuffer) >= bufferLen:
-                                del dataBuffer[0]
-                            dataBuffer.append(lineFloat[il + 496:il + 504])
-                            temp = lineFloat[il + 496:il + 498]
-                            if not len(crcCorrect) == 0:
-                                lineFloat[il + 496:il + 498] = crcCorrect
-                            else:
-                                if len(lineBuffer) >= lineLen:
-                                    del lineBuffer[0]
+                                    lineBuffer.append(lineFloat[il:il + 512])
+                                if not crcCheck(lineFloat[il:il + 510], temp):
                                     crcError += 1
-                                lineBuffer.append(lineFloat[il:il + 512])
-                            if not crcCheck(lineFloat[il:il + 510], temp):
-                                crcError += 1
-                                il += 512
-                                continue
+                                    il += 512
+                                    continue
+                            else:
+                                if not crcCheck(lineFloat[il:il + 496], lineFloat[il + 496:il + 498]):
+                                    crcError += 1
+                                    il += 512
+                                    continue
                             for it in range(7):
                                 uscount.append(float(sum([lineFloat[il + 15 + 70 * it + ius] * 256 ** (7 - ius) for ius in range(8)])) / 24.05e6)
                                 for ich in range(4):
@@ -581,26 +651,10 @@ def dataReadout(filename, isHex = False, isCi = 0, isScan = False, scanRange = [
                                         else tempAdc[ich].append(float(lineFloat[il + 31 + 2 * ich + 70 * it] * 256 + lineFloat[il + 32 + 2 * ich + 70 * it]) / 16.0)
                                     vMon[ich].append(float(lineFloat[il + 39 + 2 * ich + 70 * it] * 256 + lineFloat[il + 40 + 2 * ich + 70 * it]) / 4096.0 * 3.3 * 11.0)
                                     iMon[ich].append(float(lineFloat[il + 47 + 2 * ich + 70 * it] * 256 + lineFloat[il + 48 + 2 * ich + 70 * it]) / 4096.0 * 3.3)
-                                    bias[ich].append(vMon[ich][-1] - iMon[ich][-1] * 2.0)
+                                    bias[ich].append(vMon[ich][-1] - iMon[ich][-1])
                             il += 511
 
                     il += 1
-
-    if rateStyle == 'l':
-        timeDiff = np.array(np.array(evtBegin[1:]) - np.array(evtEnd[:-1]))
-        spectime, xtime = np.histogram(timeDiff, range = [0.7 * np.min(timeDiff), 1.2 * np.max(timeDiff)], bins = 500)
-        xtime = (xtime[1:] + xtime[:-1]) / 2
-        result = doFitGaussian(xtime, spectime)
-        center = result['fit_center']
-        sigma = result['fit_sigma']
-        bound = 100.0
-        qdiv = timeDiff >= center + bound * sigma
-        lastind = -1
-        for idiff in range(len(timeDiff)):
-            if qdiv[idiff]:
-                eventCount = (idiff - lastind) * 44 - 1
-                rateCorrect.append(eventCount / (evtEnd[idiff] - evtBegin[lastind + 1] - eventCount * 50e-6))
-                lastind = idiff
 
     print(str(crcError + len(lineBuffer)) + ' data packs with crc error')
     print(str(indexOut) + ' events with channel out of bound[0-3]')
@@ -611,11 +665,42 @@ def dataReadout(filename, isHex = False, isCi = 0, isScan = False, scanRange = [
     tempAdc = np.array(tempAdc)
     vMon = np.array(vMon)
     iMon = np.array(iMon)
+    iMon = iMon / 2.0
     bias = np.array(bias)
     uscount = np.array(uscount)
     uscountEvt = np.array(uscountEvt)
-    rateCorrect = np.array(rateCorrect)
+    timeCorrect = np.array(timeCorrect)
+    timeCorrect = timeCorrect[(timeCorrect > 0) * (timeCorrect < 20 * np.std(timeCorrect))]
+    effectiveCount = np.array(effectiveCount)
+    missingCount = np.array(missingCount)
     
+    #Time cut
+    if isCi == 2:
+        for isc in range(len(uscount)):
+            q1 = uscount[isc] > timeCut
+            uscount[isc] = uscount[isc][q1]
+            tempSipm[:, isc] = tempSipm[:, isc, q1]
+            tempAdc[:, isc] = tempAdc[:, isc, q1]
+            vMon[:, isc] = vMon[:, isc, q1]
+            iMon[:, isc] = iMon[:, isc, q1]
+            bias[:] = bias[:, isc, q1]
+            for ich in range(4):
+                q2 = uscountEvt[ich, isc] > timeCut
+                uscountEvt[ich, isc] = uscountEvt[ich, isc][q2]
+                amp[ich, isc] = amp[ich, isc][q2]
+    else:
+        q1 = uscount > timeCut
+        uscount = uscount[q1]
+        tempSipm = tempSipm[:, q1]
+        tempAdc = tempAdc[:, q1]
+        vMon = vMon[:, q1]
+        iMon = iMon[:, q1]
+        bias = bias[:, q1]
+        for ich in range(4):
+            q2 = np.array(uscountEvt[ich]) > timeCut
+            uscountEvt[ich] = np.array(uscountEvt[ich])[q2]
+            amp[ich] = np.array(amp[ich])[q2]
+            
     #Output
     print('Data readout of ' + filename + ' complete')
     if isScan:
@@ -623,20 +708,47 @@ def dataReadout(filename, isHex = False, isCi = 0, isScan = False, scanRange = [
         vScan = np.array(vScan)
         iScan = np.array(iScan)
         if isCi == 0:
-            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, rateCorrect, vSet, vScan, iScan
+            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, timeCorrect, effectiveCount, missingCount, vSet, vScan, iScan
         else:
             ampCI = np.array(ampCI)
             uscountEvtCI = np.array(uscountEvtCI)
-            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, rateCorrect, ampCI, uscountEvtCI, vSet, vScan, iScan
+            effectiveCountCI = np.array(effectiveCountCI)
+            missingCountCI = np.array(missingCountCI)
+            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, timeCorrect, effectiveCount, missingCount, ampCI, uscountEvtCI, \
+                effectiveCountCI, missingCountCI, vSet, vScan, iScan
     else:
         if isCi == 0:
-            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, rateCorrect
+            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, timeCorrect, effectiveCount, missingCount
         else:
             ampCI = np.array(ampCI)
             uscountEvtCI = np.array(uscountEvtCI)
-            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, rateCorrect, ampCI, uscountEvtCI
+            effectiveCountCI = np.array(effectiveCountCI)
+            missingCountCI = np.array(missingCountCI)
+            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, timeCorrect, effectiveCount, missingCount, ampCI, uscountEvtCI, \
+                effectiveCountCI, missingCountCI
 
-def deleteEmptyRun(amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, rateCorrect, ampCI, uscountEvtCI, scanRange):
+def HPGeDataReadout(filename):
+    """
+    Function for reading out single HPGe raw outout file
+    :param filename: name of the input file, currently supporting only .txt files
+    :return: data extracted from the data file, including spectrums and time, both in the form of ndarray
+    """
+    
+    with open(filename) as f:
+        # to remove \r\n using the following line
+        lines = [line.rstrip() for line in f]
+    
+    cts = []
+    for line in lines:
+        cts.append(int(line))
+    cts = np.array(cts)
+    time = float(cts[0])
+    cts[0], cts[1]=0, 0
+        
+    return time, cts
+
+def deleteEmptyRun(amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, timeCorrect, effectiveCount, missingCount, ampCI, uscountEvtCI, \
+    effectiveCountCI, missingCountCI, scanRange, rateStyle = '', newProgramme = False):
 
     """
     Auxiliary function to delete empty sublists for ranged multiple scan data
@@ -649,10 +761,17 @@ def deleteEmptyRun(amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt
     :param bias: bias voltage
     :param uscount: uscount data
     :param uscountEvt: event uscount data
-    :param rateCorrect: correct count rate calculated when reading data
+    :param timeCorrect: correct live time calculated when reading data
+    :param effectiveCount: effective count data
+    :param missingCount: missing count data
     :param ampCI: CI ADC amplitude data
     :param uscountEvtCI: CI event uscount data
+    :param effectiveCountCI: CI effective count data
+    :param missingCountCI: CI missing count data
     :param scanRange: list containing the scan range for multiple scans
+    :param rateStyle: the style of calculating real count rate, '' for none, 's' for calculation with small data packs(512byte), \
+'l' for calculation with large data packs(4096byte)
+    :param newProgramme: boolean indicating whether the data comes from new hardware programme(6th ver.)
     :return: all the input except scanRange in excatly the same order, and the corresponding scan numbers
     """
     
@@ -672,12 +791,24 @@ def deleteEmptyRun(amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt
     bias = list(bias)
     uscount = list(uscount)
     uscountEvt = list(uscountEvt)
-    rateCorrect = list(rateCorrect)
+    if not rateStyle == '':
+        timeCorrect = list(timeCorrect)
     ampCI = list(ampCI)
     uscountEvtCI = list(uscountEvtCI)
+    if newProgramme:
+        effectiveCount = list(effectiveCount)
+        effectiveCountCI = list(effectiveCountCI)
+        missingCount = list(missingCount)
+        missingCountCI = list(missingCountCI)
     for isc in range(nScan):
         uscount[isc] = list(uscount[isc])
-        rateCorrect[isc] = list(rateCorrect[isc])
+        if not rateStyle == '':
+            timeCorrect[isc] = list(timeCorrect[isc])
+        if newProgramme:
+            effectiveCount[isc] = list(effectiveCount[isc])
+            effectiveCountCI[isc] = list(effectiveCountCI[isc])
+            missingCount[isc] = list(missingCount[isc])
+            missingCountCI[isc] = list(missingCountCI[isc])
     for ich in range(4):
         amp[ich] = list(amp[ich])
         tempSipm[ich] = list(tempSipm[ich])
@@ -700,11 +831,19 @@ def deleteEmptyRun(amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt
             uscountEvtCI[ich][isc] = list(uscountEvtCI[ich][isc])
 
     for isc in range(lower):
-        del uscount[0], rateCorrect[0]
+        del uscount[0]
+        if not rateStyle == '':
+            del timeCorrect[0]
+        if newProgramme:
+            del effectiveCount[0], effectiveCountCI[0], missingCount[0], missingCountCI[0]
         for ich in range(4):
             del amp[ich][0], tempSipm[ich][0], tempAdc[ich][0], vMon[ich][0], iMon[ich][0], bias[ich][0], uscountEvt[ich][0], ampCI[ich][0], uscountEvtCI[ich][0]
     for isc in range(nScan - upper - 1):
-        del uscount[-1], rateCorrect[-1]
+        del uscount[-1]
+        if not rateStyle == '':
+            del timeCorrect[-1]
+        if newProgramme:
+            del effectiveCount[-1], effectiveCountCI[-1], missingCount[-1], missingCountCI[-1]
         for ich in range(4):
             del amp[ich][-1], tempSipm[ich][-1], tempAdc[ich][-1], vMon[ich][-1], iMon[ich][-1], bias[ich][-1], uscountEvt[ich][-1], ampCI[ich][-1], uscountEvtCI[ich][-1]
             
@@ -716,14 +855,21 @@ def deleteEmptyRun(amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt
     bias = np.array(bias)
     uscount = np.array(uscount)
     uscountEvt = np.array(uscountEvt)
-    rateCorrect = np.array(rateCorrect)
+    if not rateStyle == '':
+        timeCorrect = np.array(timeCorrect)
     ampCI = np.array(ampCI)
     uscountEvtCI = np.array(uscountEvtCI)
+    if newProgramme:
+        effectiveCount = np.array(effectiveCount)
+        effectiveCountCI = np.array(effectiveCountCI)
+        missingCount = np.array(missingCount)
+        missingCountCI = np.array(missingCountCI)
 
     #Thanks to ndarray, ALL THESE matter is needed to delete a SINGLE sublist!
-    return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, rateCorrect, ampCI, uscountEvtCI
+    return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, timeCorrect, effectiveCount, missingCount, ampCI, uscountEvtCI, \
+        effectiveCountCI, missingCountCI
 
-def fileOutput(filename, isCi = 0, isScan = False, scanRange = [],  *data):
+def fileOutput(filename, isCi = 0, isScan = False, scanRange = [], *data):
 
     """
     Function for writing designated readout data to files(text files in the form of '.txt')
@@ -732,7 +878,7 @@ def fileOutput(filename, isCi = 0, isScan = False, scanRange = [],  *data):
     :param isScan: boolean indicating whether the input file has I-V scan part
     :param scanRange: list containing the scan range for multiple scans
     :param *data: tuple containing all the data to be written to the output files, in the order of\
-    amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, rateCorrect, [ampCI, uscountEvtCI], [vSet, vScan, iScan]
+    amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, timeCorrect, [ampCI, uscountEvtCI], [vSet, vScan, iScan]
     :return: nope, nothing
     Output file naming rules(following the previous naming rules):
     Spectrum: out_[channel]_[[scancount]_][filename]
@@ -744,11 +890,15 @@ def fileOutput(filename, isCi = 0, isScan = False, scanRange = [],  *data):
     Bias: bias_[[scancount]_][filename]
     Time data: out_time_[[scancount]_][filename]
     Event time data: out_timeevt_[[scancount]_][filename]
-    Correct count rate: rate_[[scancount]_][filename]
+    Correct live time: livetime_[[scancount]_][filename]
+    Effective count data: eff_[[scancount]_][filename]
+    Missing count data: miss_[[scancount]_][filename]
     CI data: (output when isCi != 0)
     CI Spectrum: ci_[channel]_[[scancount]_][filename]
     CI ADC amplitude: ci_ch[channel]_[[scancount]_][filename]
     CI event time data: ci_timeevt_[[scancount]_][filename]
+    CI effective count data: ci_eff_[[scancount]_][filename]
+    CI missing count data: ci_miss_[[scancount]_][filename]
     Scan data: (output when isScan = True)
     Set voltage for voltage scan: vset_[filename]
     Scan voltage for voltage scan: vscan_[filename]
@@ -849,21 +999,39 @@ def fileOutput(filename, isCi = 0, isScan = False, scanRange = [],  *data):
                 except:
                     print('fileOutput: Error writing event uscount')
 
-            #Correct count rate
+            #Correct live time
             if not len(data[8]) == 0 and not len(data[8][0]) == 0:
                 try:
-                    with open('rate_' + str(isc + 1) + '_' + filename, 'w') as foutrate:
+                    with open('livetime_' + str(isc + 1) + '_' + filename, 'w') as fouttimecorr:
                         for j in range(len(data[8][isc])):
-                            foutrate.write(str(data[8][isc][j]) + '\n')
+                            fouttimecorr.write(str(data[8][isc][j]) + '\n')
                 except:
-                    print('fileOutput: Error writing correct count rate')
+                    print('fileOutput: Error writing correct live time')
+
+            #Effective count
+            if not len(data[9]) == 0 and not len(data[9][0]) == 0:
+                try:
+                    with open('eff_' + str(isc + 1) + '_' + filename, 'w') as fouteff:
+                        for j in range(len(data[9][isc])):
+                            fouteff.write(str(data[9][isc][j]) + '\n')
+                except:
+                    print('fileOutput: Error writing effective count')
+                    
+            #Missing count
+            if not len(data[10]) == 0 and not len(data[10][0]) == 0:
+                try:
+                    with open('miss_' + str(isc + 1) + '_' + filename, 'w') as foutmiss:
+                        for j in range(len(data[10][isc])):
+                            foutmiss.write(str(data[10][isc][j]) + '\n')
+                except:
+                    print('fileOutput: Error writing missing count')
 
             #CI ADC amplitude
             for ich in range(4):
                 try:
                     with open('ci_ch' + str(ich + 1) + '_' + str(isc + 1) + '_' + filename, 'w') as foutampCI:
-                        for j in range(len(data[9][ich][isc])):
-                            foutampCI.write(str(data[9][ich][isc][j]) + '\n')
+                        for j in range(len(data[11][ich][isc])):
+                            foutampCI.write(str(data[11][ich][isc][j]) + '\n')
                 except:
                     print('fileOutput: Error writing CI ADC amplitude file')
             
@@ -871,12 +1039,30 @@ def fileOutput(filename, isCi = 0, isScan = False, scanRange = [],  *data):
             for ich in range(4):
                 try:
                     with open('ci_timeevt_' + str(ich + 1) + '_' + str(isc + 1) + '_' + filename, 'w') as fouttimeevtCI:
-                        for j in range(len(data[10][ich][isc])):
-                            fouttimeevtCI.write(str(data[10][ich][isc][j]) + '\n')
+                        for j in range(len(data[12][ich][isc])):
+                            fouttimeevtCI.write(str(data[12][ich][isc][j]) + '\n')
                 except:
                     print('fileOutput: Error writing CI event uscount')
+                    
+            #CI effective count
+            if not len(data[13]) == 0 and not len(data[13][0]) == 0:
+                try:
+                    with open('ci_eff_' + str(isc + 1) + '_' + filename, 'w') as fouteffCI:
+                        for j in range(len(data[13][isc])):
+                            fouteffCI.write(str(data[13][isc][j]) + '\n')
+                except:
+                    print('fileOutput: Error writing CI effective count')
+                    
+            #CI missing count
+            if not len(data[14]) == 0 and not len(data[14][0]) == 0:
+                try:
+                    with open('ci_miss_' + str(isc + 1) + '_' + filename, 'w') as foutmissCI:
+                        for j in range(len(data[14][isc])):
+                            foutmissCI.write(str(data[14][isc][j]) + '\n')
+                except:
+                    print('fileOutput: Error writing CI missing count')
 
-        ind = 11
+        ind = 15
 
     #Single scan
     else:
@@ -956,16 +1142,34 @@ def fileOutput(filename, isCi = 0, isScan = False, scanRange = [],  *data):
                 except:
                     print('fileOutput: Error writing event uscount')
                     
-        #Correct count rate
+        #Correct live time
         if not len(data[8]) == 0:
             try:
-                with open('rate_' + filename, 'w') as foutrate:
+                with open('livetime_' + filename, 'w') as fouttimecorr:
                     for j in range(len(data[8])):
-                        foutrate.write(str(data[8][j]) + '\n')
+                        fouttimecorr.write(str(data[8][j]) + '\n')
             except:
-                print('fileOutput: Error writing correct count rate')
+                print('fileOutput: Error writing correct live time')
+                
+        #Effective count
+        if not len(data[9]) == 0:
+            try:
+                with open('eff_' + filename, 'w') as fouteff:
+                    for j in range(len(data[9])):
+                        fouteff.write(str(data[9][j]) + '\n')
+            except:
+                print('fileOutput: Error writing effective count')
 
-        ind = 9
+        #Missing count
+        if not len(data[10]) == 0:
+            try:
+                with open('miss_' + filename, 'w') as foutmiss:
+                    for j in range(len(data[10])):
+                        foutmiss.write(str(data[10][j]) + '\n')
+            except:
+                print('fileOutput: Error writing missing count')
+
+        ind = 11
 
         #CI data
         if isCi == 1:
@@ -987,6 +1191,25 @@ def fileOutput(filename, isCi = 0, isScan = False, scanRange = [],  *data):
                 except:
                     print('fileOutput: Error writing CI event uscount')
                 ind += 1
+                
+            #CI effective count
+            if not len(data[ind]) == 0:
+                try:
+                    with open('ci_eff_' + filename, 'w') as fouteffCI:
+                        for j in range(len(data[ind])):
+                            fouteffCI.write(str(data[ind][j]) + '\n')
+                except:
+                    print('fileOutput: Error writing CI effective count')
+            ind += 1
+
+            #CI missing count
+            if not len(data[ind]) == 0:
+                try:
+                    with open('ci_miss_' + filename, 'w') as foutmissCI:
+                        for j in range(len(data[ind])):
+                            foutmissCI.write(str(data[ind][j]) + '\n')
+                except:
+                    print('fileOutput: Error writing CI missing count')
 
     #I-V scan
     if not isCi == 0 and isScan:
@@ -1036,7 +1259,7 @@ def importData(filename, importPath, isCi = 0, isScan = False, scanRange = []):
     :param isScan: boolean indicating whether the input file has I-V scan part
     :param scanRange: list containing the scan range for multiple scans
     :return: all data extracted from the data file, including spectrums, SiPM&ADC temperatures, SiPM voltage&leak current,\
- uscount, [CI data], [I-V scan data], all data in the form of ndarray
+ uscount, correct live time, effective count, missing count, [CI data], [I-V scan data], all data in the form of ndarray
     """
 
     rootname = filename.split('\\')[-1]
@@ -1054,7 +1277,11 @@ def importData(filename, importPath, isCi = 0, isScan = False, scanRange = []):
     vSet = [] #i-v scan data
     vScan = [] #i-v scan data
     iScan = [] #i-v scan data
-    rateCorrect = []
+    timeCorrect = []
+    effectiveCount = []
+    effectiveCountCI = []
+    missingCount = []
+    missingCountCI = []
     scanNum = []
 
     for ich in range(4):
@@ -1279,8 +1506,62 @@ def importData(filename, importPath, isCi = 0, isScan = False, scanRange = []):
                         except:
                             print('importData: error reading file ' + path + '\\' + file)
                             
-                #Correct count rate files
-                elif file.startswith('rate_') and file.endswith(rootname):
+                #Correct live time files
+                elif file.startswith('livetime_') and file.endswith(rootname):
+                    try:
+                        iscan = int(file.split('_')[1])
+                        if not iscan in scanNum:
+                            scanNum.append(iscan)
+                    except:
+                        raise Exception('importFile: unable to resolve filename ' + file)
+                    if not ranged or (ranged and iscan < upper and iscan >= lower):
+                        timeCorrect.append([])
+                        try:
+                            with open(path + '\\' + file, 'r') as fin:
+                                lines = [line.rstrip() for line in fin]
+                                for line in lines:
+                                    timeCorrect[-1].append(float(line))
+                        except:
+                            print('importData: error reading file ' + path + '\\' + file)
+                            
+                #Effective count files
+                elif file.startswith('eff_') and file.endswith(rootname):
+                    try:
+                        iscan = int(file.split('_')[1])
+                        if not iscan in scanNum:
+                            scanNum.append(iscan)
+                    except:
+                        raise Exception('importFile: unable to resolve filename ' + file)
+                    if not ranged or (ranged and iscan < upper and iscan >= lower):
+                        effectiveCount.append([])
+                        try:
+                            with open(path + '\\' + file, 'r') as fin:
+                                lines = [line.rstrip() for line in fin]
+                                for line in lines:
+                                    effectiveCount[-1].append(int(line))
+                        except:
+                            print('importData: error reading file ' + path + '\\' + file)
+
+                #Missing count files
+                elif file.startswith('miss_') and file.endswith(rootname):
+                    try:
+                        iscan = int(file.split('_')[1])
+                        if not iscan in scanNum:
+                            scanNum.append(iscan)
+                    except:
+                        raise Exception('importFile: unable to resolve filename ' + file)
+                    if not ranged or (ranged and iscan < upper and iscan >= lower):
+                        missingCount.append([])
+                        try:
+                            with open(path + '\\' + file, 'r') as fin:
+                                lines = [line.rstrip() for line in fin]
+                                for line in lines:
+                                    missingCount[-1].append(int(line))
+                        except:
+                            print('importData: error reading file ' + path + '\\' + file)
+                            
+                #CI effective count files
+                elif file.startswith('ci_eff_') and file.endswith(rootname):
                     try:
                         iscan = int(file.split('_')[2])
                         if not iscan in scanNum:
@@ -1288,12 +1569,30 @@ def importData(filename, importPath, isCi = 0, isScan = False, scanRange = []):
                     except:
                         raise Exception('importFile: unable to resolve filename ' + file)
                     if not ranged or (ranged and iscan < upper and iscan >= lower):
-                        rateCorrect.append([])
+                        effectiveCountCI.append([])
                         try:
                             with open(path + '\\' + file, 'r') as fin:
                                 lines = [line.rstrip() for line in fin]
                                 for line in lines:
-                                    rateCorrect[-1].append(float(line))
+                                    effectiveCountCI[-1].append(int(line))
+                        except:
+                            print('importData: error reading file ' + path + '\\' + file)
+
+                #CI missing count files
+                elif file.startswith('ci_miss_') and file.endswith(rootname):
+                    try:
+                        iscan = int(file.split('_')[2])
+                        if not iscan in scanNum:
+                            scanNum.append(iscan)
+                    except:
+                        raise Exception('importFile: unable to resolve filename ' + file)
+                    if not ranged or (ranged and iscan < upper and iscan >= lower):
+                        missingCountCI.append([])
+                        try:
+                            with open(path + '\\' + file, 'r') as fin:
+                                lines = [line.rstrip() for line in fin]
+                                for line in lines:
+                                    missingCountCI[-1].append(int(line))
                         except:
                             print('importData: error reading file ' + path + '\\' + file)
 
@@ -1434,13 +1733,53 @@ def importData(filename, importPath, isCi = 0, isScan = False, scanRange = []):
                     except:
                         print('importData: error reading file ' + path + '\\' + file)
 
-                #Correct count rate files
-                elif file.startswith('rate_') and file.endswith(rootname):
+                #Correct live time files
+                elif file.startswith('livetime_') and file.endswith(rootname):
                     try:
                         with open(path + '\\' + file, 'r') as fin:
                             lines = [line.rstrip() for line in fin]
                             for line in lines:
-                                rateCorrect.append(float(line))
+                                timeCorrect.append(float(line))
+                    except:
+                        print('importData: error reading file ' + path + '\\' + file)
+                        
+                #Effective count files
+                elif file.startswith('eff_') and file.endswith(rootname):
+                    try:
+                        with open(path + '\\' + file, 'r') as fin:
+                            lines = [line.rstrip() for line in fin]
+                            for line in lines:
+                                effectiveCount.append(int(line))
+                    except:
+                        print('importData: error reading file ' + path + '\\' + file)
+
+                #Missing count files
+                elif file.startswith('miss_') and file.endswith(rootname):
+                    try:
+                        with open(path + '\\' + file, 'r') as fin:
+                            lines = [line.rstrip() for line in fin]
+                            for line in lines:
+                                missingCount.append(int(line))
+                    except:
+                        print('importData: error reading file ' + path + '\\' + file)
+                        
+                #CI effective count files
+                elif file.startswith('ci_eff_') and file.endswith(rootname):
+                    try:
+                        with open(path + '\\' + file, 'r') as fin:
+                            lines = [line.rstrip() for line in fin]
+                            for line in lines:
+                                effectiveCountCI.append(int(line))
+                    except:
+                        print('importData: error reading file ' + path + '\\' + file)
+
+                #CI missing count files
+                elif file.startswith('ci_miss_') and file.endswith(rootname):
+                    try:
+                        with open(path + '\\' + file, 'r') as fin:
+                            lines = [line.rstrip() for line in fin]
+                            for line in lines:
+                                missingCountCI.append(int(line))
                     except:
                         print('importData: error reading file ' + path + '\\' + file)
 
@@ -1516,7 +1855,9 @@ def importData(filename, importPath, isCi = 0, isScan = False, scanRange = []):
     bias = np.array(bias)
     uscount = np.array(uscount)
     uscountEvt = np.array(uscountEvt)
-    rateCorrect = np.array(rateCorrect)
+    timeCorrect = np.array(timeCorrect)
+    effectiveCount = np.array(effectiveCount)
+    missingCount = np.array(missingCount)
     if isScan:
         vSet = np.array(vSet)
         vScan = np.array(vScan)
@@ -1524,21 +1865,27 @@ def importData(filename, importPath, isCi = 0, isScan = False, scanRange = []):
 
     if isScan:
         if isCi == 0:
-            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, rateCorrect, vSet, vScan, iScan
+            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, timeCorrect, effectiveCount, missingCount, vSet, vScan, iScan
         else:
             ampCI = np.array(ampCI)
             uscountEvtCI = np.array(uscountEvtCI)
-            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, rateCorrect, ampCI, uscountEvtCI, vSet, vScan, iScan, scanNum
+            effectiveCountCI = np.array(effectiveCountCI)
+            missingCountCI = np.array(missingCountCI)
+            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, timeCorrect, effectiveCount, missingCount, ampCI, uscountEvtCI, \
+                effectiveCountCI, missingCountCI, vSet, vScan, iScan, scanNum
     else:
         if isCi == 0:
-            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, rateCorrect
+            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, timeCorrect, effectiveCount, missingCount
         else:
             ampCI = np.array(ampCI)
             uscountEvtCI = np.array(uscountEvtCI)
-            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, rateCorrect, ampCI, uscountEvtCI, scanNum
+            effectiveCountCI = np.array(effectiveCountCI)
+            missingCountCI = np.array(missingCountCI)
+            return amp, tempSipm, tempAdc, vMon, iMon, bias, uscount, uscountEvt, timeCorrect, effectiveCount, missingCount, ampCI, uscountEvtCI, \
+                effectiveCountCI, missingCountCI, scanNum
 
-def plotRawData(filename, amp, nbins, corr, time, singlech = False, channel = -1):
-
+def plotRawData(filename, amp, nbins, corr, time, singlech = False, channel = -1, rateStyle = '', rateAll = 0.0, doCorr = True):
+    
     """
     Function for plotting the processed, unfitted data
     :param filename: name of raw data file
@@ -1548,15 +1895,33 @@ def plotRawData(filename, amp, nbins, corr, time, singlech = False, channel = -1
     :param time: time taken to take the spectrum, usually calculated with event uscount
     :param singlech: boolean indicating whether the fit is for single channel
     :param channel: channel number for single channel fits, in range[0-3]
+    :param rateStyle: the style of calculating real count rate, '' for none, 's' forsingle live time data, 'p' for calculation with small data packs(512byte)
+    :param rateAll: correct count rate of all spectrum in all 4 channels calculated when reading data, only used when rateStyle is 's' or 'l'
+    :param doCorr: boolean indicating whether the temperature-bias correction will be done, to avoid warning info output
     :return: nothing
     """
 
+    if not doCorr:
+        corr = [1.0, 1.0, 1.0, 1.0]
+
+    styleAvailable = ['', 's', 'p']
+    if not rateStyle in styleAvailable:
+        raise Exception('plotRawData: unknown count rate correction style')
+    elif rateAll == 0.0:
+        raise Exception('plotRawData: corrected count rate not specified')
+
     if singlech:
         if not isChannel(channel):
-            raise Exception('fitSpectrum: channel number out of bound[0-3]')
+            raise Exception('plotRawData: channel number out of bound[0-3]')
         spectrum, x = getSpectrum(amp[channel], nbins, singlech)
     else:
         spectrum, x = getSpectrum(amp, nbins, singlech)
+
+    if not rateStyle == '':
+        countAll = 0.0
+        for ich in range(4):
+            countAll += float(len(amp[ich]))
+        rateFactor = rateAll / countAll
 
     fig = plt.figure(figsize=(12, 8))
     #Single channel plots
@@ -1564,7 +1929,10 @@ def plotRawData(filename, amp, nbins, corr, time, singlech = False, channel = -1
         ich = channel
         gs = gridspec.GridSpec(1, 1, wspace=0.5, hspace=0.2, left=0.13, right=0.95)
         ax = fig.add_subplot(gs[0])
-        plt.step(x * corr[ich], spectrum / time[ich], where='mid', label='raw data', zorder=1) #TBD: change the x data to energy with additional EC calculation funtcion
+        if rateStyle == '':
+            plt.step(x * corr[ich], spectrum / time[ich], where='mid', label='raw data', zorder=1) #TBD: change the x data to energy with additional EC calculation funtcion
+        else:
+            plt.step(x * corr[ich], spectrum * rateFactor, where='mid', label='raw data', zorder=1) #TBD: change the x data to energy with additional EC calculation funtcion
         ax.set_xlim([0., 65535.])
         ax.set_title('Spectrum of raw data from ' + filename)
         ax.set_xlabel('ADC/channel')
@@ -1576,7 +1944,10 @@ def plotRawData(filename, amp, nbins, corr, time, singlech = False, channel = -1
         gs = gridspec.GridSpec(4, 1, wspace=0.5, hspace=0.2, left=0.13, right=0.95)
         for ich in range(4):
             ax = fig.add_subplot(gs[ich])
-            plt.step(x[ich] * corr[ich], spectrum[ich] / time[ich], where='mid', label='raw data', zorder=1) #TBD: change the x data to energy with additional EC calculation funtcion
+            if rateStyle == '':
+                plt.step(x[ich] * corr[ich], spectrum[ich] / time[ich], where='mid', label='raw data', zorder=1) #TBD: change the x data to energy with additional EC calculation funtcion
+            else:
+                plt.step(x[ich] * corr[ich], spectrum[ich] * rateFactor, where='mid', label='raw data', zorder=1) #TBD: change the x data to energy with additional EC calculation funtcion
             ax.set_xlim([0., 65535.])
             if ich == 0:
                 ax.set_title('Spectrum of raw data from ' + filename)
@@ -1590,7 +1961,7 @@ def plotRawData(filename, amp, nbins, corr, time, singlech = False, channel = -1
 #***********************************************************************************************************************************************************
 #************************************************Basic calibration (temperature, bias and EC) part************************************************
 #***********************************************************************************************************************************************************
-
+#TBD: add a input parameter to read the bin factor/fit range from input files
 def getBiasnbinsFactor(scanNum, scanRange = []):
     #TBD: Add data for Am241
     """
@@ -1672,7 +2043,7 @@ if the data is from one single channel
     corrX = []
     return corrX
 
-def tempBiasCorrection(temp, bias, corr = False, isTemp = True, doCorr = True):
+def tempBiasCorrection(temp, bias, corr = False, isTemp = False):
     #TBD: adding the correlation factors
     #ver 0.1 with only temperature correction
 
@@ -1683,12 +2054,8 @@ def tempBiasCorrection(temp, bias, corr = False, isTemp = True, doCorr = True):
     :param corr: method of correction, correlative correction if True, independent if False
     :param isTemp: True if the data given is from temperature scan, False if the \
 data is from bias scan #TBD: reomve this part in the final version ,also note that in the main function the relation is given in REVERSE against the option
-    :param doCorr: boolean indicating whether the temperature-bias correction will be done, to avoid warning info output
     :return: correction factors and corresponding error of all 4 channels
     """
-    
-    if not doCorr:
-        return [1.0, 1.0, 1.0, 1.0], []
 
     tempStandard = 25.0
     biasStandard = 28.5
@@ -1718,21 +2085,19 @@ data is from bias scan #TBD: reomve this part in the final version ,also note th
     tempBbErr = [2.6936591101708105, 3.8549964273339454, 2.4597749629970167, 4.005732897785914]
     tempCb = [2033.2592695580918, 1995.1454480486013, 2091.256524762956, 2237.254931940749]
     tempCbErr = [19.429792750152824, 26.160130056878476, 18.645570801178525, 28.384947145852912]
-    #TBD: add the values for the following coefficients
-    tempAc = []
+    #TBD: add the errors for the following coefficients
+    tempAc = [-0.03594923117319518, -0.04593051646351449, -0.08449626753463194, 0.09429751988676158]
     tempAcErr = []
-    tempBc = []
+    tempBc = [124.622282167142, 104.0920375700276, 125.264006098604, 124.61353026819931]
     tempBcErr = []
-    tempCc = []
-    tempCcErr = []
-    biasAc = []
+    biasAc = [134.2821674425955, 136.2541684301311, 143.11481388547006, 167.3728511192398]
     biasAcErr = []
-    biasBc = []
+    biasBc = [-6629.88085155412, -6737.005948027494, -7099.806128025778, -8383.83796307196]
     biasBcErr = []
-    biasCc = []
-    biasCcErr = []
-    tempBiasBc = []
+    tempBiasBc = [-5.015141502766973, -4.224695684754486, -4.954771463432692, -5.1692210016793965]
     tempBiasBcErr = []
+    Cc = [82030.55115289443, 83455.88882892841, 88275.2920151818, 105333.17056814635]
+    CcErr = []
     
     for ich in range(4):
         tempAvg = np.average(temp[ich])
@@ -1770,9 +2135,9 @@ data is from bias scan #TBD: reomve this part in the final version ,also note th
                     (biasFactor * (tempAb[ich] * (tempAvg + tempStandard) + tempBb[ich]) * (tempStandard - tempAvg) / (tempAb[ich] * tempAvg ** 2 + tempBb[ich] * tempAvg + tempCb[ich]) ** 2 * tempCbErr[ich]) ** 2 + \
                     (tempFactor * (biasA[ich] * (biasAvg + biasStandard) + biasB[ich]) * (biasStandard - biasAvg) / (biasA[ich] * biasAvg ** 2 + biasB[ich] * biasAvg + biasC[ich]) ** 2 * biasCErr[ich]) ** 2))
         else:
-            corrFactor.append((tempAc[ich] * tempStandard ** 2 + tempBc[ich] * tempStandard + tempCc[ich] + biasAc[ich] * biasStandard ** 2 + \
-                biasBc[ich] * biasStandard + biasCc[ich] + tempBiasBc[ich] * tempStandard * biasAvg) / (tempAc[ich] * tempAvg ** 2 + tempBc[ich] * tempAvg + \
-                tempCc[ich] + biasAc[ich] * biasAvg ** 2 + biasBc[ich] * biasAvg + biasCc[ich] + tempBiasBc[ich] * tempAvg * biasAvg))
+            corrFactor.append((Cc[ich] + tempAc[ich] * tempStandard ** 2 + tempBc[ich] * tempStandard + biasAc[ich] * biasStandard ** 2 + \
+                biasBc[ich] * biasStandard + tempBiasBc[ich] * tempStandard * biasAvg) / (Cc[ich] + tempAc[ich] * tempAvg ** 2 + tempBc[ich] * tempAvg + \
+                biasAc[ich] * biasAvg ** 2 + biasBc[ich] * biasAvg + tempBiasBc[ich] * tempAvg * biasAvg))
             corrErr.append(0.0) #TBD: add error
             
     return corrFactor, corrErr
@@ -1920,8 +2285,10 @@ def doFitPeak(xdata, ydata, odr = False, xerror = [], yerror = [], quadBkg = Tru
     gModel = lmfit.models.GaussianModel(prefix = 'peak_')
     param1 = gModel.guess(ydata, x = xdata)
     if quadBkg:
+        ydatabkg = ydata - gaussianFunction([param1.valuesdict()['peak_amplitude'], param1.valuesdict()['peak_center'], param1.valuesdict()['peak_sigma']], \
+            xdata)
         qModel = lmfit.models.QuadraticModel(prefix = 'bk_')
-        param2 = qModel.guess(ydata, x = xdata)
+        param2 = qModel.guess(ydatabkg, x = xdata)
         param = param1 + param2
     else:
         param = param1
@@ -2083,7 +2450,7 @@ def doFitQuad(xdata, ydata, odr = False, xerror = [], yerror = []):
         if len(yerror) == 0:
             result = qModel.fit(ydata, param, x = xdata)
         else:
-            result = qModel.fit(ydata, param, x = xdata, weights = 1. / yerror)
+            result = qModel.fit(ydata, param, x = xdata, weights = 1. / np.array(yerror))
         fitResult = {
                         'fit_a':            result.best_values['fit_a'],
                         'fit_b':            result.best_values['fit_b'],
@@ -2105,15 +2472,28 @@ def expFunction(param, x):
     
     return param[0] * np.exp(x / param[1]) + param[2]
 
-def doFitExp(xdata, ydata, odr = False, xerror = [], yerror = []):
+def expFunctionNoConst(param, x):
 
     """
-    Function for fitting exponential data for leak current-temperature fitting
+    Auxiliary function to calculate the value of the exponential function with no constant, used for odr fitting
+    :param param: parameters of the quadratic function, in the form of [a, b]
+    :param x: input x value
+    :return: value of the exponential function
+    """
+    
+    C = 50e-6
+    return param[0] * np.exp(- (x - C) / param[1])
+
+def doFitExp(xdata, ydata, odr = False, xerror = [], yerror = [], fitRate = False):
+
+    """
+    Function for fitting exponential data for leak current-temperature and live time fitting
     :param xdata: the x data to be fit
     :param ydata: the y data to be fit
     :param odr: boolean indicating the fit method, True if the fit is done with odr, False if the fit is done with least square
     :param xerror: standard deviation of x data when using odr fit
     :param yerror: standard deviation of y data when using odr fit
+    :param fitRate: boolean indication whether the data to fit is corrected live time, if True the fit will be done with exponential function with no constant
     :return: fit result, in the form of a dictionary as
     {
         'fit_a': amplitude term
@@ -2139,21 +2519,33 @@ def doFitExp(xdata, ydata, odr = False, xerror = [], yerror = []):
             data = RealData(xdata, ydata, sx = xerror, fix = np.ones(len(xerror)))
         else:
             data = RealData(xdata, ydata, sx = xerror, sy = yerror, fix = np.ones(len(xerror)))
-    model = Model(expFunction)
-    odrFit = ODR(data, model, [param.valuesdict()['fit_amplitude'], - param.valuesdict()['fit_decay'], 1e-6])
+    if fitRate:
+        model = Model(expFunctionNoConst)
+        odrFit = ODR(data, model, [param.valuesdict()['fit_amplitude'], param.valuesdict()['fit_decay']])
+    else:
+        model = Model(expFunction)
+        odrFit = ODR(data, model, [param.valuesdict()['fit_amplitude'], - param.valuesdict()['fit_decay'], 1e-6])
     if odr:
         odrFit.set_job(fit_type = 0)
     else:
         odrFit.set_job(fit_type = 2)
     result = odrFit.run()
-    fitResult = {
-                    'fit_a':            result.beta[0],
-                    'fit_b':            result.beta[1],
-                    'fit_c':            result.beta[2],
-                    'fit_a_err':            result.sd_beta[0],
-                    'fit_b_err':            result.sd_beta[1],
-                    'fit_c_err':            result.sd_beta[2],
-        }
+    if fitRate:
+        fitResult = {
+                        'fit_a':            result.beta[0],
+                        'fit_b':            result.beta[1],
+                        'fit_a_err':            result.sd_beta[0],
+                        'fit_b_err':            result.sd_beta[1],
+            }
+    else:
+        fitResult = {
+                        'fit_a':            result.beta[0],
+                        'fit_b':            result.beta[1],
+                        'fit_c':            result.beta[2],
+                        'fit_a_err':            result.sd_beta[0],
+                        'fit_b_err':            result.sd_beta[1],
+                        'fit_c_err':            result.sd_beta[2],
+            }
     return fitResult
 
 def linExpFunction(param, x):
@@ -2469,53 +2861,162 @@ def doFixedExpFit(xdata, ydata, init, odr = False, xerror = [], yerror = []):
         }
     return fitResult
 
-def fitRateCorrect(filename, rateCorrect, plot = True, odr = False):
+def convExpFunction(param, x):
 
     """
-    Function for calculating correct total count rate and its error with the rateCorrect calculated when reading the data
+    Auxiliary function for live time fitting, the log value of distribution being reverse distribution of convolution of 43 exponential distributions
+    :param param: parameters of the function, including only a
+    :param x: x value
+    :return: the calculated funtion value as
+        ln(A * (x - 43 * C) ** 42 * exp(- (x - 43 * C) / b) / b ** 43) = A + 42 * ln(x - 43 * C) - 43 * ln(b) - (x - 43 * C) / b
+    where C = 43 * 50us is the internal dead time of the MCU
+    """
+    
+    C = 50e-6
+    return param[0] + 42.0 * np.log(x - 43 * C) - 43.0 * np.log(param[1]) - (x - 43 * C) / param[1]
+
+def doConvExpFit(xdata, ydata, init, odr = False, xerror = [], yerror = []):
+
+    """
+    Function for convolution-of-exponential fitting of count rate correction
+    :param xdata: the x data to be fit
+    :param ydata: the y data to be fit
+    :param init: the initial parameter values
+    :param odr: boolean indicating the fit method, True if the fit is done with odr, False if the fit is done with least square
+    :param xerror: standard deviation of x data when using odr fit
+    :param yerror: standard deviation of y data when using odr fit
+    :return: fit result, in the form of a dictionary as
+    {
+        'fit_a': amplitude
+        'fit_b': deacy
+        'fit_a_err': error of amplitude
+        'fit_b_err': error of decay
+    }
+    with fit function as
+    A * (x - 43 * C) ** 42 * exp(- (x - 43 * C) / b)
+    where C = 50us is the internal dead time of the MCU
+    """
+
+    if len(xerror) == 0:
+        if len(yerror) == 0:
+            data = RealData(xdata, np.log(ydata))
+        else:
+            data = RealData(xdata, np.log(ydata), sy = yerror / ydata)
+    else:
+        if len(yerror) == 0:
+            data = RealData(xdata, np.log(ydata), sx = xerror, fix = np.ones(len(xerror)))
+        else:
+            data = RealData(xdata, np.log(ydata), sx = xerror, sy = yerror / ydata, fix = np.ones(len(xerror)))
+    model = Model(convExpFunction)
+    odrFit = ODR(data, model, list(init))
+    if odr:
+        odrFit.set_job(fit_type = 0)
+    else:
+        odrFit.set_job(fit_type = 2)
+    result = odrFit.run()
+    fitResult = {
+                    'fit_a':            result.beta[0],
+                    'fit_b':            result.beta[1],
+                    'fit_a_err':            result.sd_beta[0],
+                    'fit_b_err':            result.sd_beta[1],
+        }
+    return fitResult
+
+def quad3DFunction(param, xdata, ydata):
+
+    """
+    Auxiliary function to calculate the value of 3D quadratic function for correlative temperature-bias fit
+    :param param: parameters for the 3D quadratic model, described as in the function given below
+    :param xdata: data of x dimension
+    :param ydata: data of y dimension
+    :return: vaule of quad3D(param, xdata, ydata)
+    where quad3D(param, xdata, ydata) = 
+        param[0] + param[1] * xdata + param[2] * ydata + param[3] * xdata ** 2 + param[4] * ydata ** 2 + param[5] * xdata * ydata
+    """
+
+    return param[0] + param[1] * xdata + param[2] * ydata + param[3] * xdata ** 2 + param[4] * ydata ** 2 + param[5] * xdata * ydata
+
+def residualQuad3D(param, xdata, ydata, zdata):
+
+    """
+    Auxiliary function to calculate the residual of 3D quadratic surface model for correlative temperature-bias fit
+    :param param: parameters for the 3D quadratic model, described as in the function given below
+    :param xdata: data of x dimension
+    :param ydata: data of y dimension
+    :param zdata: data of z dimension
+    :return: residual being zdata - quad3D(param, xdata, ydata)
+    where quad3D(param, xdata, ydata) = 
+        param[0] + param[1] * xdata + param[2] * ydata + param[3] * xdata ** 2 + param[4] * ydata ** 2 + param[5] * xdata * ydata
+    """
+    
+    return zdata - quad3DFunction(param, xdata, ydata)
+
+def fitRateCorrect(filename, timeCorrect, plot = True, odr = False, rateStyle = ''):
+
+    """
+    Function for calculating correct total count rate and its error with the timeCorrect calculated when reading the data
     :param filename: name of amplitude data file
-    :param rateCorrect: correct count rate calculated when reading data
+    :param timeCorrect: correct live time calculated when reading data
     :param plot: boolean indicating the whether the plotting of the fit result will be done
     :param odr: boolean indicating the fit method, True if the fit is done with odr, False if the fit is done with least square
     :return: correct total count rate and its error, as a tuple
     """
 
+    styleAvailable = ['s', 'p']
+    if not rateStyle in styleAvailable:
+        raise Exception('fitRateCorrect: unknown count rate correction style ' + rateStyle)
     rateAll = 0.0
     rateAllErr = 0.0
-    specRate, xdata = np.histogram(rateCorrect, bins=250, range=[0.9 * np.min(rateCorrect), 1.1 * np.max(rateCorrect)])
+    specTime, xdata = np.histogram(timeCorrect, bins=250, range=[np.min(timeCorrect), np.max(timeCorrect)])
     xdata = (xdata[:-1] + xdata[1:]) / 2
-    result = doFitGaussian(xdata, specRate, odr = odr, yerror = gehrelsErr(specRate))
-    amplitude = result['fit_amplitude']
-    center = result['fit_center']
-    centerErr = result['fit_center_err']
-    sigma = result['fit_sigma']
+    C = 50e-6
+    if rateStyle == 's':
+        qFit = xdata > C
+        result = doFitExp(xdata[qFit], specTime[qFit], odr = odr, yerror = gehrelsErr(specTime[qFit]), fitRate = True)
+        a = result['fit_a']
+        b = result['fit_b']
+        bErr = result['fit_b_err']
+    else:
+        qFit = (xdata > 43 * C) * (specTime > 0)
+        result = doConvExpFit(xdata[qFit], specTime[qFit], (1., C), odr = odr, yerror = gehrelsErr(specTime[qFit]))
+        a = result['fit_a']
+        b = result['fit_b']
+        bErr = result['fit_b_err']
+    rateAll = 1 / b
+    rateAllErr = bErr / b ** 2
     if plot:
-        qplot = (xdata >= center - 4 * sigma) * (xdata < center + 4 * sigma)
-        fitSpec = amplitude * np.exp(-(xdata - center) ** 2 / (2 * (sigma ** 2))) / (sigma * np.sqrt(2 * np.pi))
+        if rateStyle == 's':
+            fitSpec = expFunctionNoConst([a, b], xdata)
+            qPlot = xdata > C
+        else:
+            fitSpec = np.exp(convExpFunction([a, b], xdata))
+            qPlot = xdata > 43 * C
         fig = plt.figure(figsize=(12, 8))
         gs = gridspec.GridSpec(1, 1, wspace=0.5, hspace=0.2, left=0.13, right=0.95)
         ax = fig.add_subplot(gs[0])
-        plt.step(xdata, specRate, where='mid', label='raw data', zorder=1)
-        plt.plot(xdata, fitSpec, label='Gaussian Peak Fit')
-        plt.text(center - 2 * sigma, max(fitSpec[qplot]) * 0.8, 'count rate = ' + str('%.2e' % (center)) + ' $\pm$ ' + str('%.3e' % (centerErr)), \
-            fontsize=10, bbox=dict(facecolor='pink', alpha=0.1), horizontalalignment='center', verticalalignment='center')
-        lower = center - 4 * sigma
-        upper = center + 4 * sigma
-        ax.set_xlim([lower, upper])
-        ax.set_ylim([0, 1.2 * np.max(specRate[qplot])])
-        ax.set_title('Fit of count rate of ' + filename + '\nFit function: ' + r'$\frac{a}{\sqrt{2\pi}\sigma} e^{[{-{(x - \mu)^2}/{{2\sigma}^2}}]}$')
-        ax.set_xlabel('count rate/cps')
+        plt.step(xdata, specTime, where='mid', label='raw data', zorder=1)
+        if rateStyle == 's':
+            plt.plot(xdata[qPlot], fitSpec[qPlot], label='Exponential Fit')
+        else:
+            plt.plot(xdata[qPlot], fitSpec[qPlot], label='Exponential-convolution Fit')
+        plt.text(np.average(timeCorrect), max(specTime) * 1.1, 'live time = ' + str('%.2e' % (b)) + ' $\pm$ ' + str('%.3e' % (bErr)) + 's\ncount rate = ' + \
+            str('%.2e' % (rateAll)) + ' $\pm$ ' + str('%.3e' % (rateAllErr)) + 'cps', fontsize=10, bbox=dict(facecolor='pink', alpha=0.1), horizontalalignment='center', \
+            verticalalignment='center')
+        ax.set_ylim([0, 1.2 * np.max(specTime)])
+        if rateStyle == 's':
+            ax.set_title('Fit of live time of ' + filename + '\nFit function: ' + r'$A e^{- \frac{x - C}{b}}$')
+        else:
+            ax.set_title('Fit of live time of ' + filename + '\nFit function: ' + r'$\frac{A (x - 43 C)^{42}}{(42)!b^{43}} e^{- (x - 43C) / b}$')
+        ax.set_xlabel('live time/s')
         ax.set_ylabel('count in bins')
         ax.legend(loc=0)
         ax.grid()
         plt.show()
-    rateAll = center
-    rateAllErr = centerErr
     return rateAll, rateAllErr
 
 def fitSpectrum(filename, amp, nbins, source, corr, time, fileOutput = False, singlech = False, bkg = False, odr = False, xRange = [],\
  channel = -1, corrErr = [], bkgAmp = [], bkgtime = [], maxiter = 1, bound = 3.0, plot = True, rateStyle = '', rateAll = 0.0, rateAllErr = 0.0,\
- bkgRate = 0.0, bkgRateErr = 0.0, quadBkg = True):
+ bkgRate = 0.0, bkgRateErr = 0.0, quadBkg = True, doCorr = True):
     
     """
     Function for fitting the spectrum
@@ -2538,13 +3039,13 @@ and background) should be given in *args along with the background amplitude
     :param maxiter: maximum number of iterations, if auto-correction iteration is conducted
     :param bound: boundary for auto-correction in \sigma, with boundaries being \mu - bound * \sigma and \mu + bound * \sigma
     :param plot: boolean indicating the whether the plotting of the fit result will be done
-    :param rateStyle: the style of calculating real count rate, '' for none, 's' for calculation with small data packs(512byte), \
-'l' for calculation with large data packs(4096byte)
+    :param rateStyle: the style of calculating real count rate, '' for none, 's' for single live time data, 'p' for calculation with small data packs(512byte)
     :param rateAll: correct count rate of all spectrum in all 4 channels calculated when reading data, only used when rateStyle is 's' or 'l'
     :param rateAllErr: error of rateAll
     :param bkgRate: correct count rate of all background spectrum in all 4 channels calculated when reading data, only used when rateStyle is 's' or 'l'
     :param bkgRateErr: error of bkgRate
     :param quadBkg: boolean indicating whether the quadratic background is included in the fit function
+    :param doCorr: boolean indicating whether the temperature-bias correction will be done, to avoid warning info output
     :return: fit parameters of the gaussian peak to be used for experiment-level processing, in the form of a dictionary:
         {
             'a':        amplitude,
@@ -2569,12 +3070,12 @@ FINDING WITH THE RESOLUTION FIT DATA
             'Am241':    np.array([[1100, 2800], [1100, 2300], [1100, 2600], [1200, 2900]]),
             'Ba133':    np.array([[2500, 4500], [2800, 5500], [2800, 5500], [3200, 5500]]),
             'Na22':     np.array([[12800, 18000], [12000, 16700], [14000, 18000], [14000, 18600]]),
-            'Cs137':    np.array([[16600, 23100], [16600, 21800], [17200, 24400], [18500, 24400]]),
+            'Cs137':    np.array([[16600, 23100], [16600, 21800], [17200, 25000], [18500, 25000]]),
             'Th228':    np.array([[5100, 7700], [5700, 8400], [5400, 8000], [5700, 8400]]),
             'Co60':    np.array([[35840, 41000], [35200, 39700], [38400, 44200], [40320, 46100]]),
         }
 
-    if not source in fitRange:
+    if not source in fitRange or len(xRange) == 2:
         if source == 'x':
             if singlech:
                 if not (len(xRange) == 2 and xRange[0] > 0 and xRange[1] > xRange[0]):
@@ -2590,8 +3091,25 @@ FINDING WITH THE RESOLUTION FIT DATA
     else:
         if singlech:
             rangeLim = fitRange[source][channel]
+            if not doCorr:
+                try:
+                    for ir in range(2):
+                        rangeLim[ir]  = rangeLim[ir] / corr[channel]
+                except:
+                    pass
+                corr = [1.0, 1.0, 1.0, 1.0]
+                corrErr = []
         else:
             rangeLim = fitRange[source]
+            if not doCorr:
+                try:
+                    for ich in range(4):
+                        for ir in range(2):
+                            rangeLim[ich][ir] = rangeLim[ich][ir] / corr[ich]
+                except:
+                    pass
+                corr = [1.0, 1.0, 1.0, 1.0]
+                corrErr = []
 
     if fileOutput:
         try:
@@ -2603,9 +3121,13 @@ FINDING WITH THE RESOLUTION FIT DATA
         if not isChannel(channel):
             raise Exception('fitSpectrum: channel number out of bound[0-3]')
         spectrum, xraw = getSpectrum(amp[channel], nbins, singlech)
+        spectrumStatErr = gehrelsErr(spectrum)
     else:
         spectrum, xraw = getSpectrum(amp, nbins, singlech)
-
+        spectrumStatErr = []
+        for ich in range(4):
+            spectrumStatErr.append(gehrelsErr(spectrum[ich]))
+            
     if not rateStyle == '':
         countAll = 0.0
         for ich in range(4):
@@ -2613,17 +3135,19 @@ FINDING WITH THE RESOLUTION FIT DATA
         rateFactor = rateAll / countAll
         rateFactorErr = rateAllErr / countAll
         if singlech:
-            spectrumErr = spectrum * rateFactorErr
+            spectrumErr = np.sqrt((spectrum * rateFactorErr) ** 2 + (spectrumStatErr * rateFactor) ** 2)
             spectrum = spectrum * rateFactor
         else:
             spectrumErr = []
             for ich in range(4):
                 spectrumErr.append([])
-                spectrumErr[ich] = spectrum[ich] * rateFactorErr
+                spectrumErr[ich] = np.sqrt((spectrum[ich] * rateFactorErr) ** 2 + (spectrumStatErr[ich] * rateFactor) ** 2)
             spectrumErr = np.array(spectrumErr)
             for ich in range(4):
                 spectrum[ich] = spectrum[ich] * rateFactor
-
+    else:
+        spectrumErr = np.array(spectrumStatErr)
+        
     if bkg:
         timeScale = []
         if len(bkgAmp) == 0 or (rateStyle == '' and len(bkgtime) == 0):
@@ -2639,21 +3163,30 @@ FINDING WITH THE RESOLUTION FIT DATA
             bkgRateFactorErr = bkgRateErr / bkgCountAll
         if singlech:
             bkgSpectrum = getSpectrum(bkgAmp[channel], nbins, singlech)[0]
+            bkgSpectrumStatErr = gehrelsErr(bkgSpectrum)
             if rateStyle == '':
                 spectrum = spectrum - bkgSpectrum * timeScale[channel]
+                spectrumErr = np.sqrt(spectrumErr ** 2 + (bkgSpectrumStatErr * timeScale[channel]) ** 2)
             else:
                 spectrum = spectrum - bkgSpectrum * bkgRateFactor
-                spectrumErr = np.sqrt(spectrumErr ** 2 + (bkgSpectrum * bkgRateFactorErr) ** 2)
+                spectrumErr = np.sqrt(spectrumErr ** 2 + (bkgSpectrum * bkgRateFactorErr) ** 2 + (bkgSpectrumStatErr * bkgRateFactor) ** 2)
         else:
             bkgSpectrum = getSpectrum(bkgAmp, nbins, singlech)[0]
+            bkgSpectrumStatErr = []
+            for ich in range(4):
+                bkgSpectrumStatErr.append(gehrelsErr(bkgSpectrum[ich]))
             if rateStyle == '':
                 for ich in range(4):
                     spectrum[ich] = spectrum[ich] - bkgSpectrum[ich] * timeScale[ich]
+                    spectrumErr[ich] = np.sqrt(spectrumErr[ich] ** 2 + (bkgSpectrumStatErr[ich] * timeScale[channel]) ** 2)
             else:
                 for ich in range(4):
                     spectrum[ich] = spectrum[ich] - bkgSpectrum[ich] * bkgRateFactor
-                    spectrumErr[ich] = np.sqrt(spectrumErr[ich] ** 2 + (bkgSpectrum[ich] * bkgRateFactorErr) ** 2)
-
+                    spectrumErr[ich] = np.sqrt(spectrumErr[ich] ** 2 + (bkgSpectrum[ich] * bkgRateFactorErr) ** 2 + (bkgSpectrumStatErr[ich] * bkgRateFactor) ** 2)
+        if not rateStyle == '':
+            rateFactor -= bkgRateFactor
+            rateFactorErr = np.sqrt(rateFactorErr ** 2 + bkgRateFactorErr ** 2)
+                    
     minDiff = 1e-4
     #multi-channel fits
     if not singlech:
@@ -2662,20 +3195,16 @@ FINDING WITH THE RESOLUTION FIT DATA
             gs = gridspec.GridSpec(4, 1, wspace=0.5, hspace=0.2, left=0.13, right=0.95)
         fitResult = []
 
-        x = xraw.copy()
+        x = copy(xraw)
         for ich in range(4):
             x[ich] *= corr[ich] #temperature-bias correction
+            spectrum[ich] = spectrum[ich] * nbins / 65535
+            spectrumErr[ich] = spectrumErr[ich] * nbins / 65535
             q1 = (x[ich] >= rangeLim[ich][0] * corr[ich]) * (x[ich] < rangeLim[ich][1] * corr[ich])
             if not len(corrErr) == 0:
-                if rateStyle == '':
-                    result = doFitPeak(x[ich][q1], spectrum[ich][q1], odr, x[ich][q1] * corrErr[ich], yerror = gehrelsErr(spectrum[ich][q1]), quadBkg = quadBkg)
-                else:
-                    result = doFitPeak(x[ich][q1], spectrum[ich][q1], odr, x[ich][q1] * corrErr[ich], yerror = np.sqrt(gehrelsErr(spectrum[ich][q1]) ** 2 + spectrumErr[ich][q1] ** 2), quadBkg = quadBkg)
+                result = doFitPeak(x[ich][q1], spectrum[ich][q1], odr, x[ich][q1] * corrErr[ich], yerror = spectrumErr[ich][q1], quadBkg = quadBkg)
             else:
-                if rateStyle == '':
-                    result = doFitPeak(x[ich][q1], spectrum[ich][q1], odr, yerror = gehrelsErr(spectrum[ich][q1]), quadBkg = quadBkg)
-                else:
-                    result = doFitPeak(x[ich][q1], spectrum[ich][q1], odr, yerror = np.sqrt(gehrelsErr(spectrum[ich][q1]) ** 2 + spectrumErr[ich][q1] ** 2), quadBkg = quadBkg)
+                result = doFitPeak(x[ich][q1], spectrum[ich][q1], odr, yerror = spectrumErr[ich][q1], quadBkg = quadBkg)
             amplitude = result['peak_amplitude']
             center = result['peak_center']
             sigma = result['peak_sigma']
@@ -2689,15 +3218,9 @@ FINDING WITH THE RESOLUTION FIT DATA
             for iit in range(maxiter):
                 q2 = (x[ich] >= center - bound * sigma) * (x[ich] < center + bound * sigma)
                 if not len(corrErr) == 0:
-                    if rateStyle == '':
-                        result = doFitPeak(x[ich][q2], spectrum[ich][q2], odr, x[ich][q2] * corrErr[ich], yerror = gehrelsErr(spectrum[ich][q2]), quadBkg = quadBkg)
-                    else:
-                        result = doFitPeak(x[ich][q2], spectrum[ich][q2], odr, x[ich][q2] * corrErr[ich], yerror = np.sqrt(gehrelsErr(spectrum[ich][q2]) ** 2 + spectrumErr[ich][q2] ** 2), quadBkg = quadBkg)
+                    result = doFitPeak(x[ich][q2], spectrum[ich][q2], odr, x[ich][q2] * corrErr[ich], yerror = spectrumErr[ich][q2], quadBkg = quadBkg)
                 else:
-                    if rateStyle == '':
-                        result = doFitPeak(x[ich][q2], spectrum[ich][q2], odr, yerror = gehrelsErr(spectrum[ich][q2]), quadBkg = quadBkg)
-                    else:
-                        result = doFitPeak(x[ich][q2], spectrum[ich][q2], odr, yerror = np.sqrt(gehrelsErr(spectrum[ich][q2]) ** 2 + spectrumErr[ich][q2] ** 2), quadBkg = quadBkg)
+                    result = doFitPeak(x[ich][q2], spectrum[ich][q2], odr, yerror = spectrumErr[ich][q2], quadBkg = quadBkg)
                 amplitude = result['peak_amplitude']
                 center = result['peak_center']
                 sigma = result['peak_sigma']
@@ -2716,18 +3239,14 @@ FINDING WITH THE RESOLUTION FIT DATA
             resolutionErr = 2 * np.sqrt(2 * np.log(2)) * np.sqrt((sigmaErr / center) ** 2 + (sigma * centerErr / center ** 2) ** 2)
             #Count rate calculation part
             qRate = (x[ich] >= center - bound * sigma) * (x[ich] < center + bound * sigma)
-            if rateStyle == '':
-                resultRate = doFitPeak(xraw[ich][qRate], spectrum[ich][qRate], odr, yerror = gehrelsErr(spectrum[ich][qRate]), quadBkg = quadBkg)
-            else:
-                resultRate = doFitPeak(xraw[ich][qRate], spectrum[ich][qRate], odr, yerror = np.sqrt(gehrelsErr(spectrum[ich][qRate]) ** 2 + spectrumErr[ich][qRate] ** 2), quadBkg = quadBkg)
+            resultRate = doFitPeak(xraw[ich][qRate], spectrum[ich][qRate], odr, yerror = spectrumErr[ich][qRate], quadBkg = quadBkg)
             ampRate = resultRate['peak_amplitude']
-            ampRateErr = resultRate['peak_amplitude_err']
             if rateStyle == '':
-                rate = ampRate * nbins / 65535 / time[ich]
-                rateErr = ampRateErr * nbins / 65535 / time[ich]
+                rate = ampRate / time[ich]
+                rateErr = np.sqrt(ampRate) / time[ich]
             else:
-                rate = ampRate * nbins / 65535
-                rateErr = ampRateErr * nbins / 65535
+                rate = ampRate
+                rateErr = np.sqrt(ampRate * rateFactor + (ampRate * rateFactorErr / rateFactor) ** 2)
 
             if fileOutput:
                 try:
@@ -2763,7 +3282,7 @@ FINDING WITH THE RESOLUTION FIT DATA
                     fitTotal = fitBk + fitPeak
                 else:
                     fitTotal = fitPeak
-                qplot = (x[ich] >= center - 5 * sigma) * (x[ich] < center + 5 * sigma)
+                qplot = (x[ich] >= center - bound * sigma) * (x[ich] < center + bound * sigma)
                 ax = fig.add_subplot(gs[ich])
                 if rateStyle == '':
                     plt.step(x[ich], spectrum[ich] / time[ich], where='mid', label='raw data', zorder=1) #TBD: change the x data to energy with additional EC calculation funtcion
@@ -2810,17 +3329,13 @@ FINDING WITH THE RESOLUTION FIT DATA
         if ich < 0 or ich > 3:
             raise Exception('fitSpectrum: channel number out of bound[0-3]')
         x = xraw * corr[ich] #temperature-bias correction
+        spectrum = spectrum * nbins / 65535
+        spectrumErr = spectrumErr * nbins / 65535
         q1 = (x >= rangeLim[0] * corr[ich]) * (x < rangeLim[1] * corr[ich])
         if not len(corrErr) == 0:
-            if rateStyle == '':
-               result = doFitPeak(x[q1], spectrum[q1], odr, x[q1] * corrErr[ich], yerror = gehrelsErr(spectrum[ich][q1]), quadBkg = quadBkg)
-            else:
-               result = doFitPeak(x[q1], spectrum[q1], odr, x[q1] * corrErr[ich], yerror = np.sqrt(gehrelsErr(spectrum[ich][q1]) ** 2 + spectrumErr[ich][q1] ** 2), quadBkg = quadBkg)
+            result = doFitPeak(x[q1], spectrum[q1], odr, x[q1] * corrErr[ich], yerror = spectrumErr[q1], quadBkg = quadBkg)
         else:
-            if rateStyle == '':
-               result = doFitPeak(x[q1], spectrum[q1], odr, yerror = gehrelsErr(spectrum[ich][q1]), quadBkg = quadBkg)
-            else:
-               result = doFitPeak(x[q1], spectrum[q1], odr, yerror = np.sqrt(gehrelsErr(spectrum[ich][q1]) ** 2 + spectrumErr[ich][q1] ** 2), quadBkg = quadBkg)
+            result = doFitPeak(x[q1], spectrum[q1], odr, yerror = spectrumErr[q1], quadBkg = quadBkg)
         amplitude = result['peak_amplitude']
         center = result['peak_center']
         sigma = result['peak_sigma']
@@ -2834,15 +3349,9 @@ FINDING WITH THE RESOLUTION FIT DATA
         for iit in range(maxiter):
             q2 = (x >= center - bound * sigma) * (x < center + bound * sigma)
             if not len(corrErr) == 0:
-                if rateStyle == '':
-                    result = doFitPeak(x[q2], spectrum[q2], odr, x[q2] * corrErr[ich], yerror = gehrelsErr(spectrum[ich][q2]), quadBkg = quadBkg)
-                else:
-                    result = doFitPeak(x[q2], spectrum[q2], odr, x[q2] * corrErr[ich], yerror = np.sqrt(gehrelsErr(spectrum[ich][q2]) ** 2 + spectrumErr[ich][q2] ** 2), quadBkg = quadBkg)
+                result = doFitPeak(x[q2], spectrum[q2], odr, x[q2] * corrErr[ich], yerror = spectrumErr[q2], quadBkg = quadBkg)
             else:
-                if rateStyle == '':
-                    result = doFitPeak(x[q2], spectrum[q2], odr, yerror = gehrelsErr(spectrum[ich][q2]), quadBkg = quadBkg)
-                else:
-                    result = doFitPeak(x[q2], spectrum[q2], odr, yerror = np.sqrt(gehrelsErr(spectrum[ich][q2]) ** 2 + spectrumErr[ich][q2] ** 2), quadBkg = quadBkg)
+                result = doFitPeak(x[q2], spectrum[q2], odr, yerror = spectrumErr[q2], quadBkg = quadBkg)
             amplitude = result['peak_amplitude']
             center = result['peak_center']
             sigma = result['peak_sigma']
@@ -2853,26 +3362,22 @@ FINDING WITH THE RESOLUTION FIT DATA
             if np.abs((lastCenter - center) / lastCenter) < minDiff and np.abs((lastSigma - sigma) / lastSigma) < minDiff:
                 break
             lastCenter, lastSigma = center, sigma
-
-        ampErr = result['peak_amplitude']
-        centerErr = result['peak_center']
-        sigmaErr = result['peak_sigma']
+            
+        ampErr = result['peak_amplitude_err']
+        centerErr = result['peak_center_err']
+        sigmaErr = result['peak_sigma_err']
         resolution = 2 * np.sqrt(2 * np.log(2)) * sigma / center
         resolutionErr = 2 * np.sqrt(2 * np.log(2)) * np.sqrt((sigmaErr / center) ** 2 + (sigma * centerErr / center ** 2) ** 2)
         #Count rate calculation part
         qRate = (x >= center - bound * sigma) * (x < center + bound * sigma)
-        if rateStyle == '':
-            resultRate = doFitPeak(xraw[qRate], spectrum[qRate], odr, yerror = gehrelsErr(spectrum[ich][qRate]), quadBkg = quadBkg)
-        else:
-            resultRate = doFitPeak(xraw[qRate], spectrum[qRate], odr, yerror = np.sqrt(gehrelsErr(spectrum[ich][qRate]) ** 2 + spectrumErr[ich][qRate] ** 2), quadBkg = quadBkg)
+        resultRate = doFitPeak(xraw[qRate], spectrum[qRate], odr, yerror = spectrumErr[qRate], quadBkg = quadBkg)
         ampRate = resultRate['peak_amplitude']
-        ampRateErr = resultRate['peak_amplitude_err']
         if rateStyle == '':
-            rate = ampRate * nbins / 65535 / time[ich]
-            rateErr = ampRateErr * nbins / 65535 / time[ich]
+            rate = ampRate / time[ich]
+            rateErr = np.sqrt(ampRate) / time[ich]
         else:
-            rate = ampRate * nbins / 65535
-            rateErr = ampRateErr * nbins / 65535
+            rate = ampRate
+            rateErr = np.sqrt(ampRate * rateFactor + (ampRate * rateFactorErr / rateFactor) ** 2)
 
         if fileOutput:
             fout.write('Channel ' + str(ich) +': \n')
@@ -2906,7 +3411,7 @@ FINDING WITH THE RESOLUTION FIT DATA
                 fitTotal = fitBk + fitPeak
             else:
                 fitTotal = fitPeak
-            qplot = (x >= center - 5 * sigma) * (x < center + 5 * sigma)
+            qplot = (x >= center - bound * sigma) * (x < center + bound * sigma)
             fig = plt.figure(figsize=(12, 8))
             gs = gridspec.GridSpec(1, 1, wspace=0.5, hspace=0.2, left=0.13, right=0.95)
             ax = fig.add_subplot(gs[0])
