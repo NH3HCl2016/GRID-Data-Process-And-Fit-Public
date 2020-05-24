@@ -31,11 +31,13 @@ def printUsage():
     print('\'p\': Plot the processed data from the input file(s)')
     print('\'t\': Do temperature analysis and give the calibration results')
     print('\'b\': Do bias analysis and give the calibration results')
-    print('\'i\': Import data from output files rather than original file(usually used for multiple scans)')
+    #print('\'i\': Import data from output files rather than original file(usually used for multiple scans)')
     print('\'v\': Plot the temperature, bias and monitored voltage and current curves, and do fitting for monotored current and overvoltage against temperature/bias')
     print('\'r\': Do temperature/bias responce analysis and give the fit results')
-    print('\'-O\': Use ODR(Orthogonal distance regression) fit method')
-    print('\'-a\': Plot angular responce')
+    print('\'O\': Use ODR(Orthogonal distance regression) fit method')
+    print('\'n\': New hardware programme(6th ver.) with added data of effective and missing counts')
+    print('\'a\': Plot angular responce')
+    print('\'m\': Plot EC, Energy resolution and absolute efficiency of data from NIM. Necessary options include \'--ch\', \'--gridfile\' and \'--hpgefile\'')
     print('Other options:')
     print('\'--dir\': Process all text(.txt) files of SINGLE RUN in the given directory. Please DO NOT give additional filenames other than the directory and DO NOT give directories containing multiple scan files')
     print('\'--nbins\': Number of bins for the spectrum, in the range (0-65536]')
@@ -55,7 +57,10 @@ def printUsage():
     print('\'--sigma\': Boundary for auto-correction fit in \sigma, with boundaries being \mu - bound * \sigma and \mu + bound * \sigma')
     print('\'--noplot\': Do not plot the spectrum during fit session')
     print('\'--simu\': Give simulation result for angular responce')
-    print('\'--rate\': Style of calculating correct count rate from raw data, \'s\' for calculating with small data pack(512 bytes), \'l\' for calculating with large data pack(4096 bytes)')
+    print('\'--rate\': Style of calculating correct count rate from raw data, \'s\' for calculating with single time interval')
+    print('\'--gridfile\': Give the filepath of GRID data, When processing nim data')
+    print('\'--hpgefile\': Give the filepath of HPGe data, When processing nim data')
+    print('\'--cut\': Time cut in seconds to cut off the data in initial fwe seconds, used to cut off data before the bias is stablized(6th ver.)')
     print('Supported file type: text file(.txt)')
     return
 
@@ -70,6 +75,7 @@ singlech = False
 odr = False
 fitPlot = True
 quadBkg = True
+newProgramme = False
 isCi = 0
 option = ''
 maxiter = 1
@@ -82,7 +88,7 @@ iarg = 1
 #h: hexprint, c: with (single) CI, s: with I-V scan, o:file output, f:fit, p: plot raw data, t: temperature calibration, B: bias calibration
 #i: import data from file, v: temp&bias curves & imon fit, r: temp/bias responce, O: odr fitting, a: angular responce
 #TBD: Think of and implement more options
-optionsAvailable = ['h', 'c', 's', 'o', 'f', 'p', 't', 'b', 'i', 'v', 'r', 'O', 'a', 'g']
+optionsAvailable = ['h', 'c', 's', 'o', 'f', 'p', 't', 'b', 'v', 'r', 'O', 'a', 'g', 'n', 'm']
 sourceAvailable = ['Am241', 'Ba133', 'Cs137', 'Na22', 'Th228', 'Co60', 'x']
 nbinsRef = {
                 'Am241':        2048,
@@ -122,15 +128,19 @@ if sys.argv[iarg][0] == '-' and not len(sys.argv[iarg]) == 1:
             option += 'f'
     if 'g' in option:
         quadBkg = False
+    if 'n' in option:
+        newProgramme = True
 
 #Source, nbins, range, scans and files input part
 #v0.0.2 by ghz
 bkg = False
 simulation = False
+plotNIM = False
 binSpecified = False
 iterSpecified = False
 boundSpecified = False
 rateStyleSpecified = False
+timeCutSpecified = False
 corr = True
 source = ''
 fitRange = []
@@ -138,11 +148,14 @@ scanRange = []
 channel = -1
 nbins = 65536
 bound = 3.0
+timeCut = 0.0
 filename = []
 mulfilename = []
 simuFilename = ''
+gridFilepath = ''
+hpgeFilepath = ''
 rateStyle = ''
-rateStyles = ['s', 'l']
+rateStyles = ['s', 'p']
 if 'i' in option:
     importFilename = []
     importPath = []
@@ -274,7 +287,25 @@ while iarg < len(sys.argv):
         rateStyleSpecified = True
         iarg += 1
 
-    #No temoerature-bias correction
+    #Time cut:
+    elif sys.argv[iarg] == '--cut':
+        iarg += 1
+        if timeCutSpecified:
+            print('GridDataProcessor: please do not specify cut time more than once. The first time given will be taken as the final cut time')
+            iarg += 1
+            continue
+        try:
+            timeCut = float(sys.argv[iarg])
+            if timeCut <= 0.0:
+                raise Exception
+        except:
+            print('GridDataProcessor: cut time should be in positive float form')
+            printUsage()
+            sys.exit()
+        timeCutSpecified = True
+        iarg += 1
+
+    #No temperature-bias correction
     elif sys.argv[iarg] == '--nocorr':
         iarg += 1
         corr = False
@@ -361,6 +392,36 @@ while iarg < len(sys.argv):
         simuFilename = sys.argv[iarg]
         iarg += 1
 
+    #GRID filepath for NIM data
+    elif sys.argv[iarg] == '--gridfile':
+        iarg += 1
+        if simulation:
+            print('GridDataProcessor: please do not specify GRID filepath more than once. The first file given will be taken as the data for processing')
+            iarg += 1
+            continue
+        if not os.path.exists(sys.argv[iarg]):
+            print('GridDataProcessor: GRID filepath \'' + sys.argv[iarg] + '\' not found, this GRID filepath will be automatically omitted')
+            iarg += 1
+            continue
+        plotNIM = True
+        gridFilepath = sys.argv[iarg]
+        iarg += 1
+
+    #GRID filepath for NIM data
+    elif sys.argv[iarg] == '--hpgefile':
+        iarg += 1
+        if simulation:
+            print('GridDataProcessor: please do not specify HPGe filepath more than once. The first file given will be taken as the data for processing')
+            iarg += 1
+            continue
+        if not os.path.exists(sys.argv[iarg]):
+            print('GridDataProcessor: HPGe filepath \'' + sys.argv[iarg] + '\' not found, this HPGe filepath will be automatically omitted')
+            iarg += 1
+            continue
+        plotNIM = True
+        hpgeFilepath = sys.argv[iarg]
+        iarg += 1
+
     #Single files
     elif os.path.exists(sys.argv[iarg]):
         filename.append(sys.argv[iarg])
@@ -428,7 +489,7 @@ bkgTime = np.ones(4)
 brateAll = 0.0
 brateAllErr = 0.0
 curbamp = []
-curbrateCorrect = []
+curbtimeCorrect = []
 brateData = []
 brateDataErr = []
 if bkg:
@@ -438,12 +499,12 @@ if bkg:
             if file.endswith(bkfile):
                 del filename[filename.index(file)]
         bkgdata = grid.dataReadout(bkfile, isHex, isCi = 1, rateStyle = rateStyle)
-        curbamp, curbuscountEvt, curbrateCorrect = bkgdata[0], bkgdata[7], bkgdata[8]
+        curbamp, curbuscountEvt, curbtimeCorrect = bkgdata[0], bkgdata[7], bkgdata[8]
         for ich in range(4):
             bamp[ich] += list(curbamp[ich])
             bkgTime[ich] += curbuscountEvt[ich][-1] - curbuscountEvt[ich][0]
         if not rateStyle == '':
-            curbrateData = grid.fitRateCorrect(bkfile, curbrateCorrect, fitPlot, odr)
+            curbrateData = grid.fitRateCorrect(bkfile, curbtimeCorrect, fitPlot, odr, rateStyle = rateStyle)
             brateData.append(curbrateData[0])
             brateDataErr.append(curbrateData[1])
     bamp = np.array(bamp)
@@ -460,10 +521,14 @@ iMon = []
 bias = []
 uscount = []
 uscountEvt = []
-rateCorrect = []
+timeCorrect = []
+effectiveCount = []
+missingCount = []
 if not isCi == 0:
     ampCI = []
     uscountEvtCI = []
+    effectiveCountCI = []
+    missingCountCI = []
 if isScan:
     vSet = []
     vScan = []
@@ -497,10 +562,14 @@ curiMon = []
 curbias = []
 curuscount = []
 curuscountEvt = []
-currateCorrect = []
+curtimeCorrect = []
+cureffectiveCount = []
+curmissingCount = []
 if not isCi == 0:
     curampCI = []
     curuscountEvtCI = []
+    cureffectiveCountCI = []
+    curmissingCountCI = []
 if isScan:
     curvSet = []
     curvScan = []
@@ -516,68 +585,75 @@ for file in mulfilename + filename:
         curscanRange = scanRange[mulfilename.index(file)]
     #Readout from processed files
     if 'i' in option:
+        #UNUSED
         if isScan:
             if curCi == 0:
-                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, currateCorrect, curvSet, curvScan, curiScan = grid.importData(\
-                    file, importPath, curCi, isScan, curscanRange)
+                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, curtimeCorrect, cureffectiveCount, curmissingCount, curvSet, \
+                    curvScan, curiScan = grid.importData(file, importPath, curCi, isScan, curscanRange)
             else:
-                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, currateCorrect, curampCI, curuscountEvtCI, curvSet, curvScan, \
-                    curiScan, scanNum = grid.importData(file, importPath, curCi, isScan, curscanRange)
+                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, curtimeCorrect, cureffectiveCount, curmissingCount, curampCI, \
+                    curuscountEvtCI, cureffectiveCountCI, curmissingCountCI, curvSet, curvScan, curiScan, scanNum = grid.importData(file, importPath, curCi, isScan, curscanRange)
         else:
             if curCi == 0:
-                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, currateCorrect = grid.importData(file, importPath, curCi, \
-                    isScan, curscanRange)
-            else:
-                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, currateCorrect, curampCI, curuscountEvtCI, scanNum = grid.importData(\
+                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, curtimeCorrect, cureffectiveCount, curmissingCount = grid.importData(\
                     file, importPath, curCi, isScan, curscanRange)
+            else:
+                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, curtimeCorrect, cureffectiveCount, curmissingCount, curampCI, \
+                    curuscountEvtCI, cureffectiveCountCI, curmissingCountCI, scanNum = grid.importData(file, importPath, curCi, isScan, curscanRange)
     #Readout from raw data
     else:
         if isScan:
             if curCi == 0:
-                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, currateCorrect, curvSet, curvScan, curiScan = \
-                    grid.dataReadout(file, isHex, curCi, isScan, curscanRange, rateStyle)
+                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, curtimeCorrect, cureffectiveCount, curmissingCount, curvSet, curvScan, \
+                    curiScan = grid.dataReadout(file, isHex, curCi, isScan, curscanRange, rateStyle, newProgramme, timeCut = timeCut)
                 if fileOutput:
-                    grid.fileOutput(file.split('\\')[-1], curCi, isScan, curscanRange, *[curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, \
-                        curuscount, curuscountEvt, currateCorrect, curvSet, curvScan, curiScan])
+                    grid.fileOutput(file.split('\\')[-1], curCi, isScan, curscanRange, *[curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, \
+                        curtimeCorrect, cureffectiveCount, curmissingCount, curvSet, curvScan, curiScan])
             else:
-                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, currateCorrect, curampCI, curuscountEvtCI, curvSet, \
-                    curvScan, curiScan = grid.dataReadout(file, isHex, curCi, isScan, curscanRange)
+                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, curtimeCorrect, cureffectiveCount, curmissingCount, curampCI, curuscountEvtCI, \
+                    cureffectiveCountCI, curmissingCountCI, curvSet, curvScan, curiScan = grid.dataReadout(file, isHex, curCi, isScan, curscanRange, rateStyle, newProgramme, timeCut = timeCut)
                 if fileOutput:
-                    grid.fileOutput(file.split('\\')[-1], curCi, isScan, curscanRange, *[curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, \
-                        curuscount, curuscountEvt, currateCorrect, curampCI, curuscountEvtCI, curvSet, curvScan, curiScan])
+                    grid.fileOutput(file.split('\\')[-1], curCi, isScan, curscanRange, *[curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, curtimeCorrect, \
+                        cureffectiveCount, curmissingCount, curampCI, curuscountEvtCI, cureffectiveCountCI, curmissingCountCI, curvSet, curvScan, curiScan])
         else:
             if curCi == 0:
-                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, currateCorrect = grid.dataReadout(file, isHex, curCi, isScan, \
-                    curscanRange, rateStyle)
+                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, curtimeCorrect, cureffectiveCount, curmissingCount = grid.dataReadout(\
+                    file, isHex, curCi, isScan, curscanRange, rateStyle, newProgramme, timeCut = timeCut)
                 if fileOutput:
-                    grid.fileOutput(file.split('\\')[-1], curCi, isScan, curscanRange, *[curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, \
-                        curuscountEvt, currateCorrect])
+                    grid.fileOutput(file.split('\\')[-1], curCi, isScan, curscanRange, *[curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, curtimeCorrect, \
+                        cureffectiveCount, curmissingCount])
             else:
-                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, currateCorrect, curampCI, curuscountEvtCI = grid.dataReadout(\
-                    file, isHex, curCi, isScan, curscanRange, rateStyle)
+                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, curtimeCorrect, cureffectiveCount, curmissingCount, curampCI, curuscountEvtCI, \
+                    cureffectiveCountCI, curmissingCountCI = grid.dataReadout(file, isHex, curCi, isScan, curscanRange, rateStyle, newProgramme, timeCut = timeCut)
                 if fileOutput:
-                    grid.fileOutput(file.split('\\')[-1], curCi, isScan, curscanRange, *[curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, \
-                        curuscountEvt, currateCorrect, curampCI, curuscountEvtCI])
+                    grid.fileOutput(file.split('\\')[-1], curCi, isScan, curscanRange, *[curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, curtimeCorrect, \
+                        cureffectiveCount, curmissingCount, curampCI, curuscountEvtCI, cureffectiveCountCI, curmissingCountCI])
 
     #Plot raw spectrum
+    rateAll = 1.0
     if 'p' in option:
         #Multiple scans
         if curCi == 2:
             for isc in range(len(curuscount)):
                 if not len(curscanRange) == 0 and not (isc >= curscanRange[0] - 1 and isc <= curscanRange[1] - 1):
                     continue
+                if rateStyleSpecified:
+                    rateAll, rateAllErr = grid.fitRateCorrect('', curtimeCorrect[isc], False, odr, rateStyle = rateStyle)
                 timeSpec = []
                 for ich in range(4):
                     timeSpec.append(curuscountEvt[ich][isc][-1] - curuscountEvt[ich][isc][0])
                 grid.plotRawData('Run #' + str(isc + 1) + ' of ' + file.split('\\')[-1], curamp[:, isc], nbins * grid.getBiasnbinsFactor(isc + 1), grid.tempBiasCorrection(\
-                    curtempSipm[:, isc], curbias[:, isc], False, not 't' in option, corr)[0], timeSpec, singlech, channel = channel)
+                    curtempSipm[:, isc], curbias[:, isc], False, not 't' in option)[0], timeSpec, singlech, channel = channel, rateStyle = rateStyle, rateAll = rateAll, \
+                    doCorr = corr)
         #Single scan
         else:
+            if rateStyleSpecified:
+                rateAll, rateAllErr = grid.fitRateCorrect('', curtimeCorrect, False, odr, rateStyle = rateStyle)
             timeSpec = []
             for ich in range(4):
                 timeSpec.append(curuscountEvt[ich][-1] - curuscountEvt[ich][0])
-            grid.plotRawData(file.split('\\')[-1], curamp, nbins, grid.tempBiasCorrection(curtempSipm, curbias, False, not 't' in option, corr)[0], timeSpec, singlech, \
-                channel = channel)
+            grid.plotRawData(file.split('\\')[-1], curamp, nbins, grid.tempBiasCorrection(curtempSipm, curbias, False, not 't' in option)[0], timeSpec, singlech, \
+                channel = channel, rateStyle = rateStyle, rateAll = rateAll, doCorr = corr)
 
     #Fit session
     if 'f' in option:
@@ -590,15 +666,15 @@ for file in mulfilename + filename:
                     rateAll = 0.0
                     rateAllErr = 0.0
                     if rateStyleSpecified:
-                        rateAll, rateAllErr = grid.fitRateCorrect(str(isc + 1) + '_' + file.split('\\')[-1], currateCorrect[isc], fitPlot, odr)
+                        rateAll, rateAllErr = grid.fitRateCorrect(str(isc + 1) + '_' + file.split('\\')[-1], curtimeCorrect[isc], fitPlot, odr, rateStyle = rateStyle)
                     timeSpec = []
                     for ich in range(4):
                         timeSpec.append(curuscountEvt[ich][isc][-1] - curuscountEvt[ich][isc][0])
                     currfitResults = grid.fitSpectrum(str(isc + 1) + '_' + file.split('\\')[-1], curamp[:, isc], nbins * grid.getBiasnbinsFactor(isc + 1), source, \
-                        grid.tempBiasCorrection(curtempSipm[:, isc], curbias[:, isc], False, False, corr)[0], timeSpec, fileOutput, singlech, bkg, \
+                        grid.tempBiasCorrection(curtempSipm[:, isc], curbias[:, isc], False, False)[0], timeSpec, fileOutput, singlech, bkg, \
                         xRange = fitRange, channel = channel, bkgAmp = bamp, bkgtime = bkgTime, corrErr = grid.tempBiasCorrection(curtempSipm[:, isc], \
-                        curbias[:, isc], False, False, corr)[1], odr = odr, maxiter = maxiter, bound = bound, plot = fitPlot, rateStyle = rateStyle, \
-                        rateAll = rateAll, rateAllErr = rateAllErr, bkgRate = brateAll, bkgRateErr = brateAllErr, quadBkg = quadBkg)
+                        curbias[:, isc], False, False)[1], odr = odr, maxiter = maxiter, bound = bound, plot = fitPlot, rateStyle = rateStyle, rateAll = rateAll, \
+                        rateAllErr = rateAllErr, bkgRate = brateAll, bkgRateErr = brateAllErr, quadBkg = quadBkg, doCorr = corr)
                     for ich in range(4):
                         fitResults[ich].append(currfitResult[ich])
             else:
@@ -608,22 +684,22 @@ for file in mulfilename + filename:
                     rateAll = 0.0
                     rateAllErr = 0.0
                     if rateStyleSpecified:
-                        rateAll, rateAllErr = grid.fitRateCorrect(str(isc + 1) + '_' + file.split('\\')[-1], currateCorrect[isc], fitPlot, odr)
+                        rateAll, rateAllErr = grid.fitRateCorrect(str(isc + 1) + '_' + file.split('\\')[-1], curtimeCorrect[isc], fitPlot, odr, rateStyle = rateStyle)
                     timeSpec = []
                     for ich in range(4):
                         timeSpec.append(curuscountEvt[ich][isc][-1] - curuscountEvt[ich][isc][0])
                     if 'b' in option:
                         curfitResults = grid.fitSpectrum(str(isc + 1) + '_' + file.split('\\')[-1], curamp[:, isc], nbins * grid.getBiasnbinsFactor(isc + 1), \
-                            'x', grid.tempBiasCorrection(curtempSipm[:, isc], curbias[:, isc], False, False, corr)[0], timeSpec, fileOutput, singlech, bkg, \
+                            'x', grid.tempBiasCorrection(curtempSipm[:, isc], curbias[:, isc], False, False)[0], timeSpec, fileOutput, singlech, bkg, \
                             xRange = grid.getBiasFitRange(isc, False), channel = channel, bkgAmp = bamp, bkgtime = bkgTime, corrErr = grid.tempBiasCorrection(\
-                            curtempSipm[:, isc], curbias[:, isc], False, False, corr)[1], odr = odr, maxiter = maxiter, bound = bound, plot = fitPlot, \
-                            rateStyle = rateStyle, rateAll = rateAll, rateAllErr = rateAllErr, bkgRate = brateAll, bkgRateErr = brateAllErr, quadBkg = quadBkg)
+                            curtempSipm[:, isc], curbias[:, isc], False, False)[1], odr = odr, maxiter = maxiter, bound = bound, plot = fitPlot, rateStyle = rateStyle, \
+                            rateAll = rateAll, rateAllErr = rateAllErr, bkgRate = brateAll, bkgRateErr = brateAllErr, quadBkg = quadBkg, doCorr = corr)
                     else:
                         curfitResults = grid.fitSpectrum(str(isc + 1) + '_' + file.split('\\')[-1], curamp[:, isc], nbins * grid.getBiasnbinsFactor(isc + 1), \
-                            source, grid.tempBiasCorrection(curtempSipm[:, isc], curbias[:, isc], False, False, corr)[0], timeSpec, fileOutput, singlech, bkg, \
+                            source, grid.tempBiasCorrection(curtempSipm[:, isc], curbias[:, isc], False, False)[0], timeSpec, fileOutput, singlech, bkg, \
                             channel = channel, bkgAmp = bamp, bkgtime = bkgTime, corrErr = grid.tempBiasCorrection(curtempSipm[:, isc], curbias[:, isc], False, \
-                            False, corr)[1], odr = odr, maxiter = maxiter, bound = bound, plot = fitPlot, rateStyle = rateStyle, rateAll = rateAll, rateAllErr = \
-                            rateAllErr, bkgRate = brateAll, bkgRateErr = brateAllErr, quadBkg = quadBkg)
+                            False)[1], odr = odr, maxiter = maxiter, bound = bound, plot = fitPlot, rateStyle = rateStyle, rateAll = rateAll, rateAllErr = \
+                            rateAllErr, bkgRate = brateAll, bkgRateErr = brateAllErr, quadBkg = quadBkg, doCorr = corr)
                     if singlech:
                         fitResults.append(curfitResults)
                     else:
@@ -636,14 +712,14 @@ for file in mulfilename + filename:
                 rateAll = 0.0
                 rateAllErr = 0.0
                 if rateStyleSpecified:
-                    rateAll, rateAllErr = grid.fitRateCorrect(file.split('\\')[-1], currateCorrect, fitPlot, odr)
+                    rateAll, rateAllErr = grid.fitRateCorrect(file.split('\\')[-1], curtimeCorrect, fitPlot, odr, rateStyle = rateStyle)
                 timeSpec = []
                 for ich in range(4):
                     timeSpec.append(curuscountEvt[ich][-1] - curuscountEvt[ich][0])
-                fitResults.append(grid.fitSpectrum(file.split('\\')[-1], curamp, nbins, source, grid.tempBiasCorrection(curtempSipm, curbias, False, False, corr)[0], \
+                fitResults.append(grid.fitSpectrum(file.split('\\')[-1], curamp, nbins, source, grid.tempBiasCorrection(curtempSipm, curbias, False, False)[0], \
                     timeSpec, fileOutput, singlech, bkg, xRange = fitRange, channel = channel, bkgAmp = bamp, bkgtime = bkgTime, corrErr = grid.tempBiasCorrection(\
-                    curtempSipm, curbias, False, False, corr)[1], odr = odr, maxiter = maxiter, bound = bound, plot = fitPlot, rateStyle = rateStyle, rateAll = rateAll, \
-                    rateAllErr = rateAllErr, bkgRate = brateAll, bkgRateErr = brateAllErr, quadBkg = quadBkg))
+                    curtempSipm, curbias, False, False)[1], odr = odr, maxiter = maxiter, bound = bound, plot = fitPlot, rateStyle = rateStyle, rateAll = rateAll, \
+                    rateAllErr = rateAllErr, bkgRate = brateAll, bkgRateErr = brateAllErr, quadBkg = quadBkg, doCorr = corr))
             else:
                 if not singlech:
                     for ich in range(4):
@@ -651,14 +727,14 @@ for file in mulfilename + filename:
                 rateAll = 0.0
                 rateAllErr = 0.0
                 if rateStyleSpecified:
-                    rateAll, rateAllErr = grid.fitRateCorrect(file.split('\\')[-1], currateCorrect, fitPlot, odr)
+                    rateAll, rateAllErr = grid.fitRateCorrect(file.split('\\')[-1], curtimeCorrect, fitPlot, odr, rateStyle = rateStyle)
                 timeSpec = []
                 for ich in range(4):
                     timeSpec.append(curuscountEvt[ich][-1] - curuscountEvt[ich][0])
-                curfitResults = grid.fitSpectrum(file.split('\\')[-1], curamp, nbins, source, grid.tempBiasCorrection(curtempSipm, curbias, False, False, corr)[0], \
+                curfitResults = grid.fitSpectrum(file.split('\\')[-1], curamp, nbins, source, grid.tempBiasCorrection(curtempSipm, curbias, False, False)[0], \
                     timeSpec, fileOutput, singlech, bkg, channel = channel, bkgAmp = bamp, bkgtime = bkgTime, corrErr = grid.tempBiasCorrection(curtempSipm, \
-                    curbias, False, False, corr)[1], odr = odr, maxiter = maxiter, bound = bound, plot = fitPlot, rateStyle = rateStyle, rateAll = rateAll, \
-                    rateAllErr = rateAllErr, bkgRate = brateAll, bkgRateErr = brateAllErr, quadBkg = quadBkg)
+                    curbias, False, False)[1], odr = odr, maxiter = maxiter, bound = bound, plot = fitPlot, rateStyle = rateStyle, rateAll = rateAll, \
+                    rateAllErr = rateAllErr, bkgRate = brateAll, bkgRateErr = brateAllErr, quadBkg = quadBkg, doCorr = corr)
                 if singlech:
                     fitResults.append(curfitResults)
                 else:
@@ -668,8 +744,10 @@ for file in mulfilename + filename:
     #Remove empty runs for multiple scan files
     if curCi == 2:
         if not len(scanRange) == 0:
-            curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, currateCorrect, curampCI, curuscountEvtCI = grid.deleteEmptyRun(\
-                curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, currateCorrect, curampCI, curuscountEvtCI, curscanRange)
+            curamp, curtempSipm, curtempAdc, curvMon, curiMon, curbias, curuscount, curuscountEvt, curtimeCorrect, cureffectiveCount, curmissingCount, \
+                curampCI, curuscountEvtCI, cureffectiveCountCI, curmissingCountCI = grid.deleteEmptyRun(curamp, curtempSipm, curtempAdc, curvMon, curiMon, \
+                curbias, curuscount, curuscountEvt, curtimeCorrect, cureffectiveCount, curmissingCount, curampCI, curuscountEvtCI, cureffectiveCountCI, curmissingCountCI, \
+                curscanRange, rateStyle, newProgramme)
 
     #Add processed data to data list
     for ich in range(4):
@@ -699,9 +777,23 @@ for file in mulfilename + filename:
     if curCi == 2:
         for isc in range(len(curuscount)):
             uscount.append(curuscount[isc])
-            rateCorrect.append(currateCorrect[isc])
+            if not rateStyle == '':
+                timeCorrect.append(curtimeCorrect[isc])
+            if newProgramme:
+                effectiveCount.append(cureffectiveCount[isc])
+                effectiveCountCI.append(cureffectiveCountCI[isc])
+                missingCount.append(curmissingCount[isc])
+                missingCountCI.append(curmissingCountCI[isc])
     else:
         uscount.append(curuscount)
+        if not rateStyle == '':
+            timeCorrect.append(curtimeCorrect)
+        if newProgramme:
+            effectiveCount.append(cureffectiveCount)
+            missingCount.append(curmissingCount)
+            if not isCi == 0:
+                effectiveCountCI.append(cureffectiveCountCI)
+                missingCountCI.append(curmissingCountCI)
     if isScan:
         vSet.append(curvSet)
 
@@ -713,10 +805,17 @@ iMon = np.array(iMon)
 bias = np.array(bias)
 uscount = np.array(uscount)
 uscountEvt = np.array(uscountEvt)
-rateCorrect = np.array(rateCorrect)
+if not rateStyle == '':
+    timeCorrect = np.array(timeCorrect)
+if newProgramme:
+    effectiveCount = np.array(effectiveCount)
+    missingCount = np.array(missingCount)
 if not isCi == 0:
     ampCI = np.array(ampCI)
     uscountEvtCI = np.array(uscountEvtCI)
+    if newProgramme:
+        effectiveCountCI = np.array(effectiveCountCI)
+        missingCountCI = np.array(missingCountCI)
 if isScan:
     vSet = np.array(vSet)
     vScan = np.array(vScan)
@@ -731,20 +830,22 @@ if 'f' in option:
 
 #Temperature and bias curves, leak current and overvoltage fit
 if ('b' in option or 't' in option) and 'v' in option:
-    #experiment.tempBiasVariation(tempSipm, bias, vMon, iMon, uscount, 't' in option, singlech, True, filenames = filename)
-    if 't' in option:
-        currentInput = tempSipm
-    else:
-        currentInput = bias
-    experiment.currentFit(currentInput, iMon, 't' in option, fileOutput, form = 'mixexp', odr = odr)
+    experiment.tempBiasVariation(tempSipm, bias, vMon, iMon, uscount, 't' in option, singlech, False, filenames = filename)
+    #if 't' in option:
+    #    currentInput = tempSipm
+    #else:
+    #    currentInput = bias
+    #experiment.currentFit(currentInput, iMon, 't' in option, fileOutput, form = 'mixexp', odr = odr)
     #experiment.overvoltageFit(tempSipm, bias, 't' in option, fileOutput, odr = odr)
 
 #Temperature\bias responce fit
-if 'r' in option and 't' in option:
-    tempFit = experiment.tempBiasFit(fitResults, tempSipm, True, fileOutput, singlech, channel = channel, odr = odr)
-
-elif 'r' in option and 'b' in option:
-    biasFit = experiment.tempBiasFit(fitResults, bias, False, fileOutput, singlech, channel = channel, odr = odr)
+if 'r' in option:
+    if 't' in option and 'b' in option:
+        experiment.tempBiasFit(fitResults, tempSipm, bias, True, fileOutput, singlech, channel = channel, odr = odr, corr = True, cont = False)
+    elif 't' in option:
+        tempFit = experiment.tempBiasFit(fitResults, tempSipm, bias, True, fileOutput, singlech, channel = channel, odr = odr)
+    elif 'b' in option:
+        biasFit = experiment.tempBiasFit(fitResults, tempSipm, bias, False, fileOutput, singlech, channel = channel, odr = odr)
 
 #****************************************************************************************************************************************************
 #************************************************************Angular responce part**************************************************************
@@ -755,6 +856,16 @@ angle = np.arange(0, 375, 15)
 if 'a' in option:
     experiment.plotAngularResponce(fitResults, angle, source, fileOutput, singlech, channel = channel, rateCorr = True, simuFile = \
         simuFilename)
+
+#****************************************************************************************************************************************************
+#************************************************************ NIM data part **************************************************************
+#****************************************************************************************************************************************************
+
+#Plot nim data, including EC, Resolution and efficiency
+if 'm' in option:
+    gridResult = experiment.plotEnergyChannel(gridFilepath, ch = channel, doCorr = corr, isPlotSpec = False, isPlotEC = plotNIM, rateCorr = True, fitEC = False)
+    hpgeResult = experiment.processHPGe(hpgeFilepath, isPlotSpec = False)
+    efficiencyResult = experiment.getEfficiency(gridResult, hpgeResult, isPlot = plotNIM)
 
 #Ending line
 print('GridDataProcessor: all files processed')
